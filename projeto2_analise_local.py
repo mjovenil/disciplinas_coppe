@@ -185,21 +185,100 @@ def grafico_boxplot_sr():
     if df_plot.empty:
         return
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    sns.boxplot(data=df_plot, x="Algoritmo", y="SR (%)",
-                hue="NC", palette=["#aec7e8","#aec7e8"],
-                width=0.6, linewidth=1.2,
-                flierprops=dict(marker="o", markersize=4, alpha=0.5), ax=ax)
+    algs_order = ["DA", "ES", "Híbrido"]
+    ncs_order  = ["NC=4", "NC=8"]
+    palette_nc = {"NC=4": "#aec7e8", "NC=8": "#f4a582"}
+    offset_nc  = {"NC=4": -0.2, "NC=8": 0.2}
+
+    fig, ax = plt.subplots(figsize=(11, 6))
+
+    # Desenha cada violino manualmente para controlar ordem e posição
+    for i, alg in enumerate(algs_order):
+        for nc in ncs_order:
+            subset = df_plot[(df_plot["Algoritmo"]==alg) &
+                             (df_plot["NC"]==nc)]["SR (%)"]
+            if subset.empty:
+                continue
+            x_c   = i + offset_nc[nc]
+            cor   = palette_nc[nc]
+            vals  = subset.values
+
+            if subset.std() < 0.5:
+                # Grupo constante: barra fina
+                val = vals[0]
+                w   = 0.15
+                ax.fill_betweenx([val-1, val+1], x_c-w, x_c+w,
+                                 color=cor, alpha=0.6, linewidth=0)
+                ax.hlines(val, x_c-w, x_c+w,
+                          colors="gray", linewidth=1.2, alpha=0.9)
+            else:
+                # Violino via KDE usando statsmodels (sem scipy)
+                y_min = max(vals.min() - 5, -2)
+                y_max = min(vals.max() + 5, 105)
+                y_pts = np.linspace(y_min, y_max, 200)
+                # KDE manual com kernel gaussiano
+                bw = max(vals.std() * 0.3, 1.0)
+                dens = np.zeros_like(y_pts)
+                for v in vals:
+                    dens += np.exp(-0.5 * ((y_pts - v) / bw) ** 2)
+                dens /= (len(vals) * bw * np.sqrt(2 * np.pi))
+                # Normaliza largura
+                w_max  = 0.18
+                dens_n = dens / dens.max() * w_max
+                ax.fill_betweenx(y_pts, x_c - dens_n, x_c + dens_n,
+                                 color=cor, alpha=0.55, linewidth=0)
+                ax.plot(x_c - dens_n, y_pts, color=cor, linewidth=0.8, alpha=0.7)
+                ax.plot(x_c + dens_n, y_pts, color=cor, linewidth=0.8, alpha=0.7)
+
+    # Pontos individuais sobrepostos
     sns.stripplot(data=df_plot, x="Algoritmo", y="SR (%)",
-                  hue="NC", dodge=True,
-                  palette={f"NC={nc}": c for nc, c in [(4,"#1a6fad"),(8,"#d62728")]},
-                  size=4, alpha=0.5, jitter=True, ax=ax)
+                  hue="NC", dodge=True, order=algs_order,
+                  palette={"NC=4": "#1a6fad", "NC=8": "#d62728"},
+                  size=5, alpha=0.7, jitter=True, ax=ax)
+
+    # Eixo x com ordem correta
+    ax.set_xticks(range(len(algs_order)))
+    ax.set_xticklabels(algs_order)
+
+    # Anotações numéricas: mediana e n por grupo
+    ncs    = ["NC=4", "NC=8"]
+    offset = {"NC=4": -0.2, "NC=8": 0.2}
+
+    for i, alg in enumerate(algs_order):
+        for nc in ncs:
+            subset = df_plot[(df_plot["Algoritmo"]==alg) & (df_plot["NC"]==nc)]["SR (%)"]
+            if subset.empty:
+                continue
+            mediana = subset.median()
+            n       = len(subset)
+            x_pos   = i + offset[nc]
+            # linha da mediana
+            ax.hlines(mediana, x_pos - 0.08, x_pos + 0.08,
+                      colors="black", linewidth=1.5, zorder=5)
+            # anotação: mediana e n
+            texto = "med=" + f"{mediana:.0f}" + "%  n=" + str(n)
+            ax.annotate(texto,
+                        xy=(x_pos, mediana),
+                        xytext=(x_pos + 0.13, mediana + 3),
+                        fontsize=7.5, ha="left", va="bottom",
+                        color="black",
+                        bbox=dict(boxstyle="round,pad=0.2",
+                                  facecolor="white", alpha=0.7,
+                                  edgecolor="gray", linewidth=0.5))
 
     ax.set_title("Distribuição de SR — Todas as Combinações Testadas",
                  fontweight="bold")
     ax.set_ylabel("Taxa de Sucesso (%)")
     ax.set_xlabel("")
-    ax.legend(title="NC", loc="lower right")
+    ax.set_ylim(-5, 115)
+
+    # Legenda limpa (remove duplicatas do stripplot)
+    handles, labels = ax.get_legend_handles_labels()
+    seen = {}
+    for h, l in zip(handles, labels):
+        if l not in seen:
+            seen[l] = h
+    ax.legend(seen.values(), seen.keys(), title="NC", loc="lower right", fontsize=9)
 
     plt.tight_layout()
     out = os.path.join(output_path, "boxplot_sr.png")
@@ -262,10 +341,18 @@ def grafico_scatter_sr_tempo():
                         fontsize=7, ha="center", va="center",
                         color="white", fontweight="bold")
 
-    # Legenda algoritmo
+    # Conta combinações por algoritmo (NC=4 + NC=8)
+    n_comb = {}
+    for alg_key, label in [("da","DA"),("es","ES"),("hib","Híbrido")]:
+        total = sum(len(dados[nc][alg_key]) for nc in [4,8]
+                    if dados[nc][alg_key] is not None)
+        n_comb[label] = total
+
+    # Legenda algoritmo com contagem de combinações
     for label, cor in [("DA",COR_DA),("ES",COR_ES),("Híbrido",COR_HIB)]:
         legend_handles.append(Line2D([0],[0], marker="o", color="w",
-                                     markerfacecolor=cor, markersize=10, label=label))
+                                     markerfacecolor=cor, markersize=10,
+                                     label=f"{label}  ({n_comb[label]} comb.)"))
     # Legenda NC
     for nc, mk in [(4,"o"),(8,"s")]:
         legend_handles.append(Line2D([0],[0], marker=mk, color="gray",
@@ -358,10 +445,14 @@ def grafico_convergencia_comparativo():
         b = melhor(df)
         if b is None: continue
         hist_d = load_npy(b.get("history_Dbest_file"))
+        hist_j = load_npy(b.get("history_J_file"))
         hist_T = load_npy(b.get("history_T_file"))
         if hist_d is None: continue
         ax.plot(hist_d, color=COR_DA, linestyle=ESTILO[nc],
                 linewidth=1.8, label=f"D  NC={nc}")
+        if hist_j is not None:
+            ax.plot(-hist_j, color="tomato", linestyle=ESTILO[nc],
+                    linewidth=1.2, alpha=0.8, label=f"-J  NC={nc}")
         if hist_T is not None:
             ax.plot(hist_T, color="steelblue", linestyle=ESTILO[nc],
                     linewidth=1.2, alpha=0.8, label=f"T  NC={nc}")
@@ -381,12 +472,17 @@ def grafico_convergencia_comparativo():
         if b is None: continue
         hist_d = load_npy(b.get("history_Dbest_file"))
         hist_t = load_npy(b.get("history_time_file"))
+        hist_j = load_npy(b.get("history_J_file"))
         hist_T = load_npy(b.get("history_T_file"))
         if hist_d is None or hist_t is None: continue
         t_plot = np.concatenate([[0], hist_t])
         h_plot = np.concatenate([[hist_d[0]], hist_d])
         ax.plot(t_plot, h_plot, color=COR_DA, linestyle=ESTILO[nc],
                 linewidth=1.8, label=f"D  NC={nc}")
+        if hist_j is not None:
+            hj = np.concatenate([[hist_j[0]], hist_j])
+            ax.plot(t_plot, -hj, color="tomato", linestyle=ESTILO[nc],
+                    linewidth=1.2, alpha=0.8, label=f"-J  NC={nc}")
         if hist_T is not None:
             T_plot = np.concatenate([[hist_T[0]], hist_T])
             ax.plot(t_plot, T_plot, color="steelblue", linestyle=ESTILO[nc],

@@ -53,7 +53,6 @@ def J_hard(X, Y):
 #   Nind        — tamanho da população (mu)
 #   Npais       — pais sorteados por geração (seleção uniforme)
 #   Nfilhos     — filhos gerados por geração (lambda)
-#                  dica: usar Nfilhos = 7*Nind (recomendação literatura)
 #   Nsob        — sobreviventes — estratégia (mu, lambda)
 #   Nger        — número máximo de gerações
 #   epson0      — sigma_min
@@ -62,7 +61,8 @@ def J_hard(X, Y):
 #   sigma0_low  — limite inferior da inicialização dos sigmas
 #   sigma0_high — limite superior da inicialização dos sigmas
 #   clip_val    — limita centróides ao intervalo [-clip_val, +clip_val] após mutação
-#   patience    — para se sem melhora por N gerações consecutivas
+#   patience    — para se sem melhora por N gerações consecutivas no D_best
+#                 OU se já atingiu a tolerância e ficou N gerações sem nova melhora
 #   prec        — probabilidade de recombinação (0 a 1)
 #   pmut        — probabilidade de mutação (0 a 1)
 #   tol         — tolerância para considerar sucesso (|J - J_ref| <= tol)
@@ -82,7 +82,7 @@ def run_es(
     sigma0_low=0.1,
     sigma0_high=0.5,
     clip_val=None,
-    patience=50,
+    patience=20,
     prec=1.0,
     pmut=1.0,
     tol=1e-2,
@@ -118,39 +118,34 @@ def run_es(
 
     history_D     = np.zeros(Nger)
     history_Dbest = np.zeros(Nger)
-    history_time  = np.zeros(Nger)   # tempo acumulado por geração
-    sem_melhora   = 0
-    ncalls        = Nind              # avaliações iniciais
-    isuc          = 0                 # flag de sucesso
-    ncalls_suc    = 0                 # avaliações até o sucesso
+    history_time  = np.zeros(Nger)
+    sem_melhora         = 0   # gerações sem melhora no D_best (geral)
+    sem_melhora_pos_suc = 0   # gerações sem melhora após atingir tolerância
+    ncalls        = Nind
+    isuc          = 0
+    ncalls_suc    = 0
 
     for g in range(Nger):
 
-        t_ger = time.perf_counter()
-
         # Seleção de pais: sorteio aleatório uniforme
-        # usa len(ind) e não Nind: a partir da 2ª geração ind tem Nsob linhas
         idx_pais = rng.integers(len(ind), size=Npais)
         pais     = ind[idx_pais]
 
         # Recombinação (com probabilidade prec)
-        i1s  = rng.integers(Npais, size=Nfilhos)
-        i2s  = rng.integers(Npais, size=Nfilhos)
-        mask_rec = rng.random(Nfilhos) < prec   # quais filhos recombinar
+        i1s      = rng.integers(Npais, size=Nfilhos)
+        i2s      = rng.integers(Npais, size=Nfilhos)
+        mask_rec = rng.random(Nfilhos) < prec
         mask_var = rng.random((Nfilhos, Nd)) < 0.5
 
         filhos = np.zeros((Nfilhos, 2 * Nd))
-        # filhos que recombinaram: discreta nas variáveis
         filhos[mask_rec, :Nd]  = np.where(
             mask_var[mask_rec],
             pais[i1s[mask_rec], :Nd],
             pais[i2s[mask_rec], :Nd]
         )
-        # filhos que recombinaram: intermediária nos sigmas
         filhos[mask_rec, Nd:]  = 0.5 * (
             pais[i1s[mask_rec], Nd:] + pais[i2s[mask_rec], Nd:]
         )
-        # filhos que NÃO recombinaram: cópia do pai 1
         filhos[~mask_rec, :Nd] = pais[i1s[~mask_rec], :Nd]
         filhos[~mask_rec, Nd:] = pais[i1s[~mask_rec], Nd:]
 
@@ -182,9 +177,13 @@ def run_es(
         if J_fil[idx_sort[0]] < D_best:
             D_best      = J_fil[idx_sort[0]]
             Y_best      = ind[0, :Nd].reshape(3, NC).copy()
-            sem_melhora = 0
+            sem_melhora = 0           # reseta contador geral
+            if isuc == 0:             # pos-sucesso NAO reseta apos atingir tolerancia
+                sem_melhora_pos_suc = 0
         else:
             sem_melhora += 1
+        if isuc == 1:                 # conta sempre apos tolerancia atingida
+            sem_melhora_pos_suc += 1
 
         history_D[g]     = float(np.mean(J_fil))
         history_Dbest[g] = D_best
@@ -196,21 +195,28 @@ def run_es(
                 isuc       = 1
                 ncalls_suc = ncalls
 
-        # Critério de parada antecipada
+        # Critério de parada 1: patience geral (sem melhora em qualquer momento)
         if sem_melhora >= patience:
             history_D     = history_D[:g+1]
             history_Dbest = history_Dbest[:g+1]
             history_time  = history_time[:g+1]
             break
 
+        # Critério de parada 2: patience pós-sucesso
+        # (já atingiu tolerância e ficou N gerações sem nova melhora)
+        if isuc == 1 and sem_melhora_pos_suc >= patience:
+            history_D     = history_D[:g+1]
+            history_Dbest = history_Dbest[:g+1]
+            history_time  = history_time[:g+1]
+            break
+
     elapsed = time.perf_counter() - start_time
-    print(f"    Tempo de execução: {elapsed:.2f} s | D_best={D_best:.6f} | isuc={isuc}")
+    print(f"    Tempo de execução: {elapsed:.2f} s | J_best={D_best:.6f} | isuc={isuc}")
 
     return D_best, Y_best, history_D, history_Dbest, history_time, isuc, ncalls_suc
 
 # =========================================================
 # 4. Loop de 100 execuções — calcula SR, MBF, AES
-#    (igual à metodologia da Ana Cláudia)
 # =========================================================
 def run_100_execucoes(
     data_vectors,
@@ -225,12 +231,6 @@ def run_100_execucoes(
     Nexec=100,
     base_seed=0
 ):
-    """
-    Executa o ES Nexec vezes com seeds independentes e calcula:
-      SR  — taxa de sucesso (% execuções com |J - J_ref| <= tol)
-      MBF — média do melhor custo encontrado em cada execução
-      AES — número médio de avaliações até o sucesso (só nas bem-sucedidas)
-    """
     J_runs    = []
     isuc_runs = []
     aes_runs  = []
@@ -298,7 +298,7 @@ def grid_search_es(
     sigma0_low_values  = [0.1],
     sigma0_high_values = [0.5],
     clip_val_values    = [None],
-    patience_values    = [50],
+    patience_values    = [20],
     prec_values        = [1.0],
     pmut_values        = [1.0],
     tol=1e-2,
@@ -367,7 +367,6 @@ def grid_search_es(
             print(f"[{idx}/{total}] Pulando combinação já calculada.")
             continue
 
-        # ETA
         elapsed_grid = time.perf_counter() - t_grid_start
         eta_str = (str(datetime.timedelta(
                         seconds=int(elapsed_grid / (idx-1) * (total-idx+1))))
@@ -381,7 +380,6 @@ def grid_search_es(
               f"sigma0=[{sigma0_low},{sigma0_high}], clip={clip_val}, "
               f"patience={patience}, prec={prec}, pmut={pmut}")
 
-        # 100 execuções para SR / MBF / AES
         metrics = run_100_execucoes(
             data_vectors=data_vectors, NC=NC, J_ref=J_global_ref,
             Nind=Nind, Npais=Npais, Nfilhos=Nfilhos, Nsob=Nsob,
@@ -392,7 +390,6 @@ def grid_search_es(
             tol=tol, Nexec=Nexec, base_seed=0
         )
 
-        # Medição de tempo (N_rep repetições, seed=0)
         print(f"  -> Medindo tempo ({N_rep} repetições)...")
         t_runs = []
         for _ in range(N_rep):
@@ -411,7 +408,6 @@ def grid_search_es(
         tempo_std   = float(np.std(t_runs))
         print(f"  -> Tempo médio: {tempo_medio:.3f} s | Std: {tempo_std:.3f} s")
 
-        # Salva arquivos
         combo_tag = (
             f"Nind{Nind}_Np{Npais}_Nfil{Nfilhos}_Nsob{Nsob}"
             f"_Nger{Nger}_eps{epson0}"
@@ -420,7 +416,6 @@ def grid_search_es(
             f"_pat{patience}_pr{prec}_pm{pmut}"
         ).replace(".", "p").replace("None", "def")
 
-        centroids_path     = os.path.join(local_path, f"es_centroids_{combo_tag}.npy")
         history_D_path     = os.path.join(local_path, f"es_history_D_{combo_tag}.npy")
         history_Dbest_path = os.path.join(local_path, f"es_history_Dbest_{combo_tag}.npy")
         history_time_path  = os.path.join(local_path, f"es_history_time_{combo_tag}.npy")
@@ -507,7 +502,7 @@ def grid_search_es(
 
     df_results = (
         pd.read_csv(csv_path)
-        .sort_values(by="SR", ascending=False)   # ordena por SR primeiro
+        .sort_values(by="SR", ascending=False)
         .reset_index(drop=True)
     )
 
@@ -518,21 +513,18 @@ def grid_search_es(
     return df_results, best_record
 
 # =========================================================
-# 6. Plot ES — dois gráficos de convergência
-#    (eixo x por gerações E por tempo)
+# 6. Plot ES
 # =========================================================
 def plot_best_solution_es(data_vectors, cluster_centers, best_record):
 
-    Xbest          = best_record["best_X"] if "best_X" in best_record else None
     history_D      = np.asarray(best_record["best_hist_D"])
     history_Dbest  = np.asarray(best_record["best_hist_Dbest"])
     history_time   = np.asarray(best_record["best_hist_time"])
     J_ref          = J_hard(cluster_centers, data_vectors)
 
-    # ── Gráfico 1: eixo x = gerações ──────────────────────────────────
     plt.figure(figsize=(10, 6))
     plt.plot(history_D,     'r-', label='Custo médio da geração')
-    plt.plot(history_Dbest, 'k-', label='Melhor custo acumulado (D_best)')
+    plt.plot(history_Dbest, 'k-', label='Melhor custo acumulado (J_best)')
     plt.axhline(y=J_ref, color='b', linestyle='--', linewidth=1.0,
                 label='Custo com centros verdadeiros')
     plt.grid(); plt.xlabel('Geração'); plt.ylabel('Custo')
@@ -541,10 +533,9 @@ def plot_best_solution_es(data_vectors, cluster_centers, best_record):
     plt.savefig(os.path.join(local_path, "es_convergencia_geracao.png"), dpi=150)
     plt.show()
 
-    # ── Gráfico 2: eixo x = tempo (s) — mesmo estilo da Ana Cláudia ──
     plt.figure(figsize=(10, 6))
     plt.plot(history_time, history_D,     'r-', label='Custo médio da geração')
-    plt.plot(history_time, history_Dbest, 'k-', label='Melhor custo acumulado (D_best)')
+    plt.plot(history_time, history_Dbest, 'k-', label='Melhor custo acumulado (J_best)')
     plt.axhline(y=J_ref, color='b', linestyle='--', linewidth=1.0,
                 label='Custo com centros verdadeiros')
     plt.grid(); plt.xlabel('Tempo (s)'); plt.ylabel('Custo')
@@ -553,108 +544,92 @@ def plot_best_solution_es(data_vectors, cluster_centers, best_record):
     plt.savefig(os.path.join(local_path, "es_convergencia_tempo.png"), dpi=150)
     plt.show()
 
-    # ── Gráfico 3D ────────────────────────────────────────────────────
-    if Xbest is not None:
-        fig = plt.figure(figsize=(9, 7))
-        ax  = fig.add_subplot(111, projection='3d')
-        ax.scatter(data_vectors[0,:], data_vectors[1,:], data_vectors[2,:],
-                   c='k', s=8, alpha=0.25, depthshade=False, label='Dados')
-        ax.scatter(Xbest[0,:], Xbest[1,:], Xbest[2,:],
-                   c='red', s=220, marker='o',
-                   edgecolors='white', linewidths=1.8, depthshade=False,
-                   label='Centróides ES')
-        ax.scatter(cluster_centers[0,:], cluster_centers[1,:], cluster_centers[2,:],
-                   c='blue', s=260, marker='x', linewidths=2.5, depthshade=False,
-                   label='Centros verdadeiros')
-        ax.set_xlabel("x1"); ax.set_ylabel("x2"); ax.set_zlabel("x3")
-        ax.set_title("ES - Clustering 3D")
-        ax.legend(); plt.tight_layout()
-        plt.savefig(os.path.join(local_path, "es_clustering_3d.png"), dpi=150)
-        plt.show()
-
 # =========================================================
-# 7. Medição de tempo de execução (chamada explícita)
-# =========================================================
-def medir_tempo_es(data_vectors, NC, best_record, N_rep=10):
-    tempos = []
-
-    def parse_none(v):
-        if v is None or (isinstance(v, str) and v in ("None", "def")):
-            return None
-        return float(v)
-
-    Nind        = int(best_record["Nind"])
-    Npais       = int(best_record["Npais"])
-    Nfilhos     = int(best_record["Nfilhos"])
-    Nsob        = int(best_record["Nsob"])
-    Nger        = int(best_record["Nger"])
-    epson0      = float(best_record["epson0"])
-    tau1        = parse_none(best_record["tau1"])
-    tau2        = parse_none(best_record["tau2"])
-    sigma0_low  = float(best_record["sigma0_low"])
-    sigma0_high = float(best_record["sigma0_high"])
-    clip_val    = parse_none(best_record["clip_val"])
-    patience    = int(best_record["patience"])
-    prec        = float(best_record["prec"])
-    pmut        = float(best_record["pmut"])
-
-    J_ref = J_hard(
-        np.load(best_record_path_es.replace("best_record_es.npz", ""))
-        if False else np.zeros((3, NC)),
-        data_vectors
-    ) if False else None
-
-    print(f"\nMedindo tempo de execução ({N_rep} repetições)...")
-    for rep in range(N_rep):
-        t0 = time.perf_counter()
-        run_es(
-            data_vectors=data_vectors, NC=NC,
-            Nind=Nind, Npais=Npais, Nfilhos=Nfilhos, Nsob=Nsob,
-            Nger=Nger, epson0=epson0, tau1=tau1, tau2=tau2,
-            sigma0_low=sigma0_low, sigma0_high=sigma0_high,
-            clip_val=clip_val, patience=patience,
-            prec=prec, pmut=pmut, init_seed=0
-        )
-        tempos.append(time.perf_counter() - t0)
-        print(f"  rep {rep+1:2d}/{N_rep}: {tempos[-1]:.3f} s")
-
-    media = float(np.mean(tempos))
-    std   = float(np.std(tempos))
-    print(f"\nTempo médio  : {media:.3f} s")
-    print(f"Desvio padrão: {std:.3f} s")
-    return media, std
-
-# =========================================================
-# 8. Execução principal
+# 7. Execução principal
 # =========================================================
 if __name__ == "__main__":
 
-    NC_number = 4   # ← mude aqui para 4, 8, 16, etc.
+    NC_number = 4   # <- mude aqui para 4, 8, 16, etc.
 
-    # Diretório de saída automático baseado no NC_number
     local_path = os.path.expanduser(f"~/cpe723_es_nc{NC_number}")
     os.makedirs(local_path, exist_ok=True)
-    csv_path_es = os.path.join(local_path, "grid_search_es_results.csv")
+    csv_path_es         = os.path.join(local_path, "grid_search_es_results.csv")
     best_record_path_es = os.path.join(local_path, "best_record_es.npz")
     print(f"Resultados salvos em: {local_path}")
+
     data_vectors, cluster_centers = generate_data_r3(P=100, NC=NC_number, sigma=0.1, seed=1)
     J_ref = J_hard(cluster_centers, data_vectors)
     print(f"Custo com centros verdadeiros: {J_ref:.6f}")
 
-    N_rep_timing = 10   # repetições para medir tempo
-    Nexec        = 100  # execuções por combinação (para SR/MBF/AES)
+    N_rep_timing = 10
+    Nexec        = 100
+
+    # # ---------------------------------------------------------
+    # # Fase 1: Tamanho da população
+    # # ---------------------------------------------------------
+    # df_results, best_record = grid_search_es(
+    #     data_vectors=data_vectors,
+    #     cluster_centers=cluster_centers,
+    #     NC=NC_number,
+    #     Nind_values        = [50, 100, 200],
+    #     Npais_values       = [30, 50, 100],
+    #     Nfilhos_values     = [300],
+    #     Nsob_values        = [50, 100, 200],
+    #     Nger_values        = [800],
+    #     epson0_values      = [1e-8],
+    #     tau1_values        = [None],
+    #     tau2_values        = [None],
+    #     sigma0_low_values  = [0.1],
+    #     sigma0_high_values = [0.5],
+    #     clip_val_values    = [None],
+    #     patience_values    = [10],
+    #     prec_values        = [1.0],
+    #     pmut_values        = [1.0],
+    #     tol=1e-2,
+    #     Nexec=Nexec,
+    #     N_rep=N_rep_timing,
+    #     csv_path=csv_path_es,
+    #     best_record_path=best_record_path_es,
+    # )
+
+    # # ---------------------------------------------------------
+    # # Fase 2: Testar lambda = 7*mu
+    # # ---------------------------------------------------------
+    # df_results, best_record = grid_search_es(
+    #     data_vectors=data_vectors,
+    #     cluster_centers=cluster_centers,
+    #     NC=NC_number,
+    #     Nind_values        = [50, 100],
+    #     Npais_values       = [50, 100],
+    #     Nfilhos_values     = [350, 700],
+    #     Nsob_values        = [50, 100],
+    #     Nger_values        = [800],
+    #     epson0_values      = [1e-8],
+    #     tau1_values        = [None],
+    #     tau2_values        = [None],
+    #     sigma0_low_values  = [0.1],
+    #     sigma0_high_values = [0.5],
+    #     clip_val_values    = [None],
+    #     patience_values    = [10],
+    #     prec_values        = [1.0],
+    #     pmut_values        = [1.0],
+    #     tol=1e-2,
+    #     Nexec=Nexec,
+    #     N_rep=N_rep_timing,
+    #     csv_path=csv_path_es,
+    #     best_record_path=best_record_path_es,
+    # )
 
     # ---------------------------------------------------------
-    # Fase 1: sem clip — explora parâmetros populacionais,
-    #         prec e pmut
+    # Fase 3 - nc4: Variação de prec e pmut
     # ---------------------------------------------------------
     df_results, best_record = grid_search_es(
         data_vectors=data_vectors,
         cluster_centers=cluster_centers,
         NC=NC_number,
         Nind_values        = [50],
-        Npais_values       = [40],
-        Nfilhos_values     = [300],
+        Npais_values       = [50],
+        Nfilhos_values     = [700],
         Nsob_values        = [50],
         Nger_values        = [800],
         epson0_values      = [1e-8],
@@ -663,9 +638,9 @@ if __name__ == "__main__":
         sigma0_low_values  = [0.1],
         sigma0_high_values = [0.5],
         clip_val_values    = [None],
-        patience_values    = [50],
-        prec_values        = [0.7, 0.9, 1.0],   # varia prec
-        pmut_values        = [0.7, 0.9, 1.0],   # varia pmut
+        patience_values    = [10],
+        prec_values        = [0.7, 0.9, 1.0],
+        pmut_values        = [0.7, 0.9, 1.0],
         tol=1e-2,
         Nexec=Nexec,
         N_rep=N_rep_timing,
@@ -673,30 +648,32 @@ if __name__ == "__main__":
         best_record_path=best_record_path_es,
     )
 
-    # ---------------------------------------------------------
-    # Fase 2: com clip — descomente após concluir Fase 1
-    # ---------------------------------------------------------
+    # # ---------------------------------------------------------
+    # # Fase 3 - nc8: Variação de prec e pmut
+    # # ---------------------------------------------------------
     # df_results, best_record = grid_search_es(
     #     data_vectors=data_vectors,
     #     cluster_centers=cluster_centers,
     #     NC=NC_number,
-    #     Nind_values        = [50],
-    #     Npais_values       = [40],
-    #     Nfilhos_values     = [300],
-    #     Nsob_values        = [50],
+    #     Nind_values        = [100],
+    #     Npais_values       = [100],
+    #     Nfilhos_values     = [700],
+    #     Nsob_values        = [100],
     #     Nger_values        = [800],
     #     epson0_values      = [1e-8],
     #     tau1_values        = [None],
     #     tau2_values        = [None],
     #     sigma0_low_values  = [0.1],
     #     sigma0_high_values = [0.5],
-    #     clip_val_values    = [3.0, 5.0],
-    #     patience_values    = [50],
-    #     prec_values        = [1.0],
-    #     pmut_values        = [1.0],
+    #     clip_val_values    = [None],
+    #     patience_values    = [5],
+    #     prec_values        = [0.7, 0.9, 1.0],
+    #     pmut_values        = [0.7, 0.9, 1.0],
     #     tol=1e-2,
     #     Nexec=Nexec,
     #     N_rep=N_rep_timing,
+    #     csv_path=csv_path_es,
+    #     best_record_path=best_record_path_es,
     # )
 
     print("\n===== Top 10 combinações (por SR) =====")
@@ -712,5 +689,4 @@ if __name__ == "__main__":
                   "prec","pmut","patience","SR","MBF","AES","J_best"]:
             if k in best_record:
                 print(f"  {k} = {best_record[k]}")
-
         plot_best_solution_es(data_vectors, cluster_centers, best_record)

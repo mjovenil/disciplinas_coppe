@@ -112,7 +112,7 @@ def run_hibrido(
     sigma0_low=0.1,
     sigma0_high=0.5,
     clip_val=None,
-    patience=50,
+    patience=5,
     prec=1.0,
     pmut=1.0,
     T_da=1.0,
@@ -152,7 +152,8 @@ def run_hibrido(
     history_D     = np.zeros(Nger)
     history_Dbest = np.zeros(Nger)
     history_time  = np.zeros(Nger)
-    sem_melhora   = 0
+    sem_melhora         = 0
+    sem_melhora_pos_suc = 0   # conta gerações após atingir tolerância
     ncalls        = Nind
     isuc          = 0
     ncalls_suc    = 0
@@ -219,9 +220,13 @@ def run_hibrido(
         if J_fil[idx_sort[0]] < D_best:
             D_best      = J_fil[idx_sort[0]]
             Y_best      = ind[0, :Nd].reshape(3, NC).copy()
-            sem_melhora = 0
+            sem_melhora = 0           # reseta contador geral
+            if isuc == 0:             # pos-sucesso NAO reseta apos atingir tolerancia
+                sem_melhora_pos_suc = 0
         else:
             sem_melhora += 1
+        if isuc == 1:                 # conta sempre apos tolerancia atingida
+            sem_melhora_pos_suc += 1
 
         history_D[g]     = float(np.mean(J_fil))
         history_Dbest[g] = D_best
@@ -232,7 +237,15 @@ def run_hibrido(
                 isuc       = 1
                 ncalls_suc = ncalls
 
+        # Critério de parada 1: patience geral
         if sem_melhora >= patience:
+            history_D     = history_D[:g+1]
+            history_Dbest = history_Dbest[:g+1]
+            history_time  = history_time[:g+1]
+            break
+
+        # Critério de parada 2: patience pos-sucesso (5 gerações fixas após tolerância)
+        if isuc == 1 and sem_melhora_pos_suc >= patience:
             history_D     = history_D[:g+1]
             history_Dbest = history_Dbest[:g+1]
             history_time  = history_time[:g+1]
@@ -516,7 +529,7 @@ def plot_best_solution_hibrido(data_vectors, cluster_centers, best_record):
 # =========================================================
 if __name__ == "__main__":
 
-    NC_number = 4   # ← mude aqui para 4, 8, 16, etc.
+    NC_number = 8   # ← mude aqui para 4, 8, 16, etc.
 
     # Diretório de saída automático baseado no NC_number
     local_path = os.path.expanduser(f"~/cpe723_hibrido_nc{NC_number}")
@@ -531,8 +544,39 @@ if __name__ == "__main__":
     N_rep_timing = 10
     Nexec        = 100
 
+    # # ---------------------------------------------------------
+    # # Fase 1: nc4 parâmetros ES fixos no melhor encontrado,
+    # #         varia T_da e alpha_da para calibrar o passo DA
+    # # ---------------------------------------------------------
+    # df_results, best_record = grid_search_hibrido(
+    #     data_vectors=data_vectors,
+    #     cluster_centers=cluster_centers,
+    #     NC=NC_number,
+    #     Nind_values        = [50],
+    #     Npais_values       = [50],
+    #     Nfilhos_values     = [700],
+    #     Nsob_values        = [50],
+    #     Nger_values        = [800],
+    #     epson0_values      = [1e-8],
+    #     tau1_values        = [None],
+    #     tau2_values        = [None],
+    #     sigma0_low_values  = [0.1],
+    #     sigma0_high_values = [0.5],
+    #     clip_val_values    = [None],
+    #     patience_values    = [10],
+    #     prec_values        = [0.7],
+    #     pmut_values        = [1.0],
+    #     T_da_values        = [0.1, 0.5, 1.0, 2.0],   # temperatura do passo DA
+    #     alpha_da_values    = [0.3, 0.5, 0.7, 1.0],   # intensidade do guiamento
+    #     tol=1e-2,
+    #     Nexec=Nexec,
+    #     N_rep=N_rep_timing,
+    #     csv_path=csv_path_hib,
+    #     best_record_path=best_record_path_hib,
+    # )
+
     # ---------------------------------------------------------
-    # Fase 1: parâmetros ES fixos no melhor encontrado,
+    # Fase 1: nc8 parâmetros ES fixos no melhor encontrado,
     #         varia T_da e alpha_da para calibrar o passo DA
     # ---------------------------------------------------------
     df_results, best_record = grid_search_hibrido(
@@ -550,7 +594,7 @@ if __name__ == "__main__":
         sigma0_low_values  = [0.1],
         sigma0_high_values = [0.5],
         clip_val_values    = [None],
-        patience_values    = [50],
+        patience_values    = [20],
         prec_values        = [1.0],
         pmut_values        = [1.0],
         T_da_values        = [0.1, 0.5, 1.0, 2.0],   # temperatura do passo DA
