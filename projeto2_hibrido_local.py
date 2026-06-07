@@ -1,21 +1,12 @@
 # Algoritmo Híbrido ES+DA
 # Versão local — Linux / VS Code
 #
-# Ideia: a cada geração do ES, após a recombinação e antes da
-# mutação gaussiana, aplica-se uma iteração do DA sobre os
-# centróides de cada filho. O DA fornece uma direção de melhora
-# determinística (gradiente implícito), que orienta a busca do ES
-# em vez de deixá-la completamente aleatória.
-#
 # Fluxo por geração:
 #   1. Seleção de pais         (igual ao ES)
 #   2. Recombinação            (igual ao ES)
 #   3. Passo DA                (novo — orienta os centróides)
 #   4. Mutação gaussiana       (igual ao ES — mantém diversidade)
 #   5. Seleção (mu, lambda)    (igual ao ES)
-#
-# Dependências:
-#   pip install numpy matplotlib pandas
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -28,13 +19,10 @@ import time
 # =========================================================
 # 0. Diretório de saída local
 # =========================================================
-# local_path é definido dinamicamente no __main__ com base em NC_number
-local_path = None  # será atualizado em __main__
-# csv_path_hib e best_record_path_hib são definidos em __main__
+local_path = None
 csv_path_hib = None
 best_record_path_hib = None
 print("Resultados Híbrido serão salvos em:")
-# csv_path_hib e best_record_path_hib serão impressos em __main__
 
 # =========================================================
 # 1. Geração de dados sintéticos em R^3
@@ -59,44 +47,20 @@ def J_hard(X, Y):
     return np.mean(np.min(dist2, axis=0))
 
 # =========================================================
-# 3. Passo DA — uma iteração do DA sobre um conjunto de
-#    centróides Y, retorna os centróides atualizados Y_new.
-#
-#    Este é o "gradiente implícito" que orienta o ES:
-#    Y_new = argmin_Y D(Y) dado Y atual e temperatura T.
-#
-#    Para T alto: atualização suave, centróides se movem pouco.
-#    Para T baixo: atualização mais agressiva, convergência local.
+# 3. Passo DA
 # =========================================================
 def passo_da(X, Y, T):
-    """
-    X: dados (M, N)
-    Y: centróides atuais (M, K)
-    T: temperatura do DA
-    Retorna Y_new: centróides após uma iteração do DA
-    """
     diff = X[:, :, None] - Y[:, None, :]   # (M, N, K)
     d    = np.sum(diff**2, axis=0).T        # (K, N)
     p    = np.exp(-d / T)
     Zx   = np.sum(p, axis=0)               # (N,)
-    p   /= Zx                              # normaliza
+    p   /= Zx
     weights = np.sum(p, axis=1)            # (K,)
     Y_new   = (X @ p.T) / weights         # (M, K)
     return Y_new
 
 # =========================================================
 # 4. Uma execução do Híbrido ES+DA
-#
-# Parâmetros novos em relação ao ES puro:
-#   T_da     — temperatura usada no passo DA por geração.
-#               Valores altos: guiamento suave (exploração).
-#               Valores baixos: guiamento forte (explotação).
-#               default: 1.0
-#   alpha_da — fator de mistura entre passo DA e posição atual:
-#               Y_guiado = alpha_da * Y_da + (1-alpha_da) * Y_atual
-#               alpha_da=1.0: usa completamente o passo DA.
-#               alpha_da=0.0: ignora o DA (equivale ao ES puro).
-#               default: 1.0
 # =========================================================
 def run_hibrido(
     data_vectors,
@@ -124,14 +88,13 @@ def run_hibrido(
     start_time = time.perf_counter()
     rng  = np.random.default_rng(init_seed)
     Nd   = 3 * NC
-    X    = data_vectors                    # (3, N)
+    X    = data_vectors
 
     if tau1 is None:
         tau1 = 1.0 / np.sqrt(2 * Nd)
     if tau2 is None:
         tau2 = 1.0 / np.sqrt(2 * np.sqrt(Nd))
 
-    # Inicialização — igual ao ES/DA: N(0,1)
     x_ini     = rng.standard_normal((Nind, Nd))
     sigma_ini = sigma0_low + (sigma0_high - sigma0_low) * rng.random((Nind, Nd))
     ind = np.hstack([x_ini, sigma_ini])
@@ -153,18 +116,16 @@ def run_hibrido(
     history_Dbest = np.zeros(Nger)
     history_time  = np.zeros(Nger)
     sem_melhora         = 0
-    sem_melhora_pos_suc = 0   # conta gerações após atingir tolerância
+    sem_melhora_pos_suc = 0
     ncalls        = Nind
     isuc          = 0
     ncalls_suc    = 0
 
     for g in range(Nger):
 
-        # ── Seleção de pais ───────────────────────────────────────────
         idx_pais = rng.integers(len(ind), size=Npais)
         pais     = ind[idx_pais]
 
-        # ── Recombinação ──────────────────────────────────────────────
         i1s      = rng.integers(Npais, size=Nfilhos)
         i2s      = rng.integers(Npais, size=Nfilhos)
         mask_rec = rng.random(Nfilhos) < prec
@@ -182,18 +143,13 @@ def run_hibrido(
         filhos[~mask_rec, :Nd] = pais[i1s[~mask_rec], :Nd]
         filhos[~mask_rec, Nd:] = pais[i1s[~mask_rec], Nd:]
 
-        # ── Passo DA — orienta os centróides de cada filho ────────────
-        # Aplica uma iteração do DA sobre os centróides de cada filho,
-        # obtendo uma direção de melhora determinística.
-        # Y_guiado = alpha_da * Y_da + (1-alpha_da) * Y_atual
         if alpha_da > 0.0:
             for j in range(Nfilhos):
-                Y_atual = filhos[j, :Nd].reshape(3, NC)
-                Y_da    = passo_da(X, Y_atual, T_da)
+                Y_atual  = filhos[j, :Nd].reshape(3, NC)
+                Y_da     = passo_da(X, Y_atual, T_da)
                 Y_guiado = alpha_da * Y_da + (1.0 - alpha_da) * Y_atual
                 filhos[j, :Nd] = Y_guiado.flatten()
 
-        # ── Mutação gaussiana com auto-adaptação dos sigmas ───────────
         mask_mut = rng.random(Nfilhos) < pmut
         if mask_mut.any():
             r_comum = rng.standard_normal((Nfilhos, 1))
@@ -206,11 +162,9 @@ def run_hibrido(
             filhos[mask_mut, :Nd] += shat[mask_mut] * r_mut[mask_mut]
             filhos[mask_mut, Nd:]  = shat[mask_mut]
 
-        # ── Clip ──────────────────────────────────────────────────────
         if clip_val is not None:
             filhos[:, :Nd] = np.clip(filhos[:, :Nd], -clip_val, clip_val)
 
-        # ── Avaliação e seleção (mu, lambda) ──────────────────────────
         J_fil  = custo_batch(filhos)
         ncalls += Nfilhos
 
@@ -220,12 +174,12 @@ def run_hibrido(
         if J_fil[idx_sort[0]] < D_best:
             D_best      = J_fil[idx_sort[0]]
             Y_best      = ind[0, :Nd].reshape(3, NC).copy()
-            sem_melhora = 0           # reseta contador geral
-            if isuc == 0:             # pos-sucesso NAO reseta apos atingir tolerancia
+            sem_melhora = 0
+            if isuc == 0:
                 sem_melhora_pos_suc = 0
         else:
             sem_melhora += 1
-        if isuc == 1:                 # conta sempre apos tolerancia atingida
+        if isuc == 1:
             sem_melhora_pos_suc += 1
 
         history_D[g]     = float(np.mean(J_fil))
@@ -237,14 +191,12 @@ def run_hibrido(
                 isuc       = 1
                 ncalls_suc = ncalls
 
-        # Critério de parada 1: patience geral
         if sem_melhora >= patience:
             history_D     = history_D[:g+1]
             history_Dbest = history_Dbest[:g+1]
             history_time  = history_time[:g+1]
             break
 
-        # Critério de parada 2: patience pos-sucesso (5 gerações fixas após tolerância)
         if isuc == 1 and sem_melhora_pos_suc >= patience:
             history_D     = history_D[:g+1]
             history_Dbest = history_Dbest[:g+1]
@@ -257,7 +209,7 @@ def run_hibrido(
     return D_best, Y_best, history_D, history_Dbest, history_time, isuc, ncalls_suc
 
 # =========================================================
-# 5. Loop de 100 execuções — SR, MBF, AES
+# 5. Loop de 100 execuções — SR, MBF, AES e desvios
 # =========================================================
 def run_100_execucoes_hibrido(
     data_vectors, NC, J_ref,
@@ -295,13 +247,18 @@ def run_100_execucoes_hibrido(
         if (i + 1) % 10 == 0:
             print(f"    {i+1}/{Nexec} execuções concluídas")
 
-    SR  = float(np.mean(isuc_runs))
-    MBF = float(np.mean(D_runs))
-    AES = float(np.mean(aes_runs)) if aes_runs else np.nan
-    print(f"  SR={SR*100:.1f}%  MBF={MBF:.6f}  AES={AES:.0f}")
+    SR      = float(np.mean(isuc_runs))
+    MBF     = float(np.mean(D_runs))
+    MBF_std = float(np.std(D_runs))
+    AES     = float(np.mean(aes_runs)) if aes_runs else np.nan
+    AES_std = float(np.std(aes_runs))  if aes_runs else np.nan
+
+    print(f"  SR={SR*100:.1f}%  MBF={MBF:.6f}+/-{MBF_std:.6f}  AES={AES:.0f}+/-{AES_std:.0f}")
 
     return {
-        "SR": SR, "MBF": MBF, "AES": AES, "J_best": best_D,
+        "SR": SR, "MBF": MBF, "MBF_std": MBF_std,
+        "AES": AES, "AES_std": AES_std,
+        "J_best": best_D,
         "best_hist_D": best_hist_D,
         "best_hist_Dbest": best_hist_Dbest,
         "best_hist_time": best_hist_time,
@@ -448,10 +405,12 @@ def grid_search_hibrido(
             "prec": prec, "pmut": pmut,
             "T_da": T_da, "alpha_da": alpha_da,
             "tol": tol, "Nexec": Nexec,
-            "SR":    metrics["SR"],
-            "MBF":   metrics["MBF"],
-            "AES":   metrics["AES"],
-            "J_best":metrics["J_best"],
+            "SR":      metrics["SR"],
+            "MBF":     metrics["MBF"],
+            "MBF_std": metrics["MBF_std"],
+            "AES":     metrics["AES"],
+            "AES_std": metrics["AES_std"],
+            "J_best":  metrics["J_best"],
             "J_global_reference": float(J_global_ref),
             "tempo_medio_s": tempo_medio,
             "tempo_std_s":   tempo_std,
@@ -463,8 +422,8 @@ def grid_search_hibrido(
         df_row = pd.DataFrame([row])
         write_header = not os.path.exists(csv_path)
         df_row.to_csv(csv_path, mode="a", header=write_header, index=False)
-        print(f"  -> SR={metrics['SR']*100:.1f}% | MBF={metrics['MBF']:.6f} | "
-              f"AES={metrics['AES']:.0f} | salvo no CSV")
+        print(f"  -> SR={metrics['SR']*100:.1f}% | MBF={metrics['MBF']:.6f}+/-{metrics['MBF_std']:.6f} | "
+              f"AES={metrics['AES']:.0f}+/-{metrics['AES_std']:.0f} | salvo no CSV")
 
         if metrics["J_best"] < best_global_value:
             best_global_value = metrics["J_best"]
@@ -529,14 +488,14 @@ def plot_best_solution_hibrido(data_vectors, cluster_centers, best_record):
 # =========================================================
 if __name__ == "__main__":
 
-    NC_number = 8   # ← mude aqui para 4, 8, 16, etc.
+    NC_number = 8   # <- mude aqui para 4, 8, 16, etc.
 
-    # Diretório de saída automático baseado no NC_number
     local_path = os.path.expanduser(f"~/cpe723_hibrido_nc{NC_number}")
     os.makedirs(local_path, exist_ok=True)
     csv_path_hib         = os.path.join(local_path, "grid_search_hibrido_results.csv")
     best_record_path_hib = os.path.join(local_path, "best_record_hibrido.npz")
     print(f"Resultados salvos em: {local_path}")
+
     data_vectors, cluster_centers = generate_data_r3(P=100, NC=NC_number, sigma=0.1, seed=1)
     J_ref = J_hard(cluster_centers, data_vectors)
     print(f"Custo com centros verdadeiros: {J_ref:.6f}")
@@ -545,8 +504,7 @@ if __name__ == "__main__":
     Nexec        = 100
 
     # # ---------------------------------------------------------
-    # # Fase 1: nc4 parâmetros ES fixos no melhor encontrado,
-    # #         varia T_da e alpha_da para calibrar o passo DA
+    # # Fase 1: nc4
     # # ---------------------------------------------------------
     # df_results, best_record = grid_search_hibrido(
     #     data_vectors=data_vectors,
@@ -566,8 +524,8 @@ if __name__ == "__main__":
     #     patience_values    = [10],
     #     prec_values        = [0.7],
     #     pmut_values        = [1.0],
-    #     T_da_values        = [0.1, 0.5, 1.0, 2.0],   # temperatura do passo DA
-    #     alpha_da_values    = [0.3, 0.5, 0.7, 1.0],   # intensidade do guiamento
+    #     T_da_values        = [0.1, 0.5, 1.0, 2.0],
+    #     alpha_da_values    = [0.3, 0.5, 0.7, 1.0],
     #     tol=1e-2,
     #     Nexec=Nexec,
     #     N_rep=N_rep_timing,
@@ -576,8 +534,7 @@ if __name__ == "__main__":
     # )
 
     # ---------------------------------------------------------
-    # Fase 1: nc8 parâmetros ES fixos no melhor encontrado,
-    #         varia T_da e alpha_da para calibrar o passo DA
+    # Fase 1: nc8
     # ---------------------------------------------------------
     df_results, best_record = grid_search_hibrido(
         data_vectors=data_vectors,
@@ -597,8 +554,8 @@ if __name__ == "__main__":
         patience_values    = [20],
         prec_values        = [1.0],
         pmut_values        = [1.0],
-        T_da_values        = [0.1, 0.5, 1.0, 2.0],   # temperatura do passo DA
-        alpha_da_values    = [0.3, 0.5, 0.7, 1.0],   # intensidade do guiamento
+        T_da_values        = [0.1, 0.5, 1.0, 2.0],
+        alpha_da_values    = [0.3, 0.5, 0.7, 1.0],
         tol=1e-2,
         Nexec=Nexec,
         N_rep=N_rep_timing,
@@ -608,14 +565,14 @@ if __name__ == "__main__":
 
     print("\n===== Top 10 combinações (por SR) =====")
     cols_show = ["Nind","Npais","Nfilhos","Nsob","T_da","alpha_da",
-                 "SR","MBF","AES","J_best","tempo_medio_s"]
+                 "SR","MBF","MBF_std","AES","AES_std","J_best","tempo_medio_s"]
     cols_ok = [c for c in cols_show if c in df_results.columns]
     print(df_results[cols_ok].head(10).to_string())
 
     if best_record is not None:
         print("\n===== Melhor combinação =====")
         for k in ["Nind","Npais","Nfilhos","Nsob","Nger",
-                  "T_da","alpha_da","SR","MBF","AES","J_best"]:
+                  "T_da","alpha_da","SR","MBF","MBF_std","AES","AES_std","J_best"]:
             if k in best_record:
                 print(f"  {k} = {best_record[k]}")
         plot_best_solution_hibrido(data_vectors, cluster_centers, best_record)

@@ -16,9 +16,7 @@ from mpl_toolkits.mplot3d import Axes3D
 # =========================================================
 # 0. Diretório de saída local
 # =========================================================
-# local_path é definido dinamicamente no __main__ com base em NC_number
-local_path = None  # será atualizado em __main__
-# csv_path_da e best_record_path_da são definidos em __main__
+local_path = None
 csv_path_da = None
 best_record_path_da = None
 print("Resultados DA serão salvos em:")
@@ -49,16 +47,6 @@ def J_hard(X, Y):
 
 # =========================================================
 # 3. Uma execução do DA (versão vetorizada)
-#
-# Parâmetros:
-#   T0      — temperatura inicial
-#   alpha   — fator de redução da temperatura
-#   epsilon — perturbação após convergência em cada temperatura
-#   delta   — critério de convergência local (variação relativa de J)
-#   I       — número máximo de iterações
-#   Tmin    — temperatura mínima (critério de parada)
-#   tol     — tolerância para considerar sucesso (|D - D_ref| <= tol)
-#   D_ref   — custo de referência (centros verdadeiros)
 # =========================================================
 def run_da(
     data_vectors,
@@ -85,8 +73,8 @@ def run_da(
     T      = T0
     D_best = np.inf
     isuc   = 0
-    ncalls = 0       # avaliações da função custo
-    ncalls_suc = 0   # avaliações até o sucesso
+    ncalls = 0
+    ncalls_suc = 0
 
     history_J      = np.zeros(I)
     history_D      = np.zeros(I)
@@ -96,21 +84,16 @@ def run_da(
 
     for i in range(I):
 
-        # Calcula distâncias (K, N): d[k,n] = ||x_n - y_k||^2
         diff = X[:, :, None] - Y[:, None, :]      # (M, N, K)
         d    = np.sum(diff**2, axis=0).T           # (K, N)
 
         p    = np.exp(-d / T)
         Zx   = np.sum(p, axis=0)                  # (N,)
-        p   /= Zx                                 # normaliza: p(k|x_n)
+        p   /= Zx
 
-        # Atualiza centróides: y_k = sum_n p(k|x_n)*x_n / sum_n p(k|x_n)
         weights = np.sum(p, axis=1)               # (K,)
         Y       = (X @ p.T) / weights             # (M, K)
 
-        # Métricas
-        # 1 chamada por iteração = 1 passagem pela partição + centróide
-        # (conforme orientação do professor)
         ncalls += 1
         J_val   = -T / N * np.sum(np.log(Zx))
         D_val   = np.mean(np.sum(p * d, axis=0))
@@ -126,20 +109,17 @@ def run_da(
 
         history_Dbest[i] = D_best
 
-        # Verifica sucesso
         if isuc == 0 and D_ref is not None:
             if abs(D_best - D_ref) <= tol:
                 isuc       = 1
                 ncalls_suc = ncalls
 
-        # Critério de convergência local → reduz temperatura
         if i > 0:
             rel_change = abs(history_J[i] - history_J[i-1]) / max(abs(history_J[i-1]), 1e-12)
             if rel_change < delta:
                 T *= alpha
                 Y += epsilon * np.random.normal(0, 1, Y.shape)
 
-        # Critério de parada
         if T < Tmin:
             i += 1
             break
@@ -155,8 +135,7 @@ def run_da(
     )
 
 # =========================================================
-# 4. Loop de 100 execuções — calcula SR, MBF, AES
-#    (mesmo padrão do ES)
+# 4. Loop de 100 execuções — calcula SR, MBF, AES e desvios
 # =========================================================
 def run_100_execucoes_da(
     data_vectors,
@@ -167,12 +146,6 @@ def run_100_execucoes_da(
     Nexec=100,
     base_seed=0
 ):
-    """
-    Executa o DA Nexec vezes com seeds independentes e calcula:
-      SR  — taxa de sucesso (% execuções com |D - D_ref| <= tol)
-      MBF — média do melhor custo encontrado em cada execução
-      AES — número médio de avaliações até o sucesso (só nas bem-sucedidas)
-    """
     D_runs    = []
     isuc_runs = []
     aes_runs  = []
@@ -209,14 +182,17 @@ def run_100_execucoes_da(
         if (i + 1) % 10 == 0:
             print(f"    {i+1}/{Nexec} execuções concluídas")
 
-    SR  = float(np.mean(isuc_runs))
-    MBF = float(np.mean(D_runs))
-    AES = float(np.mean(aes_runs)) if aes_runs else np.nan
+    SR      = float(np.mean(isuc_runs))
+    MBF     = float(np.mean(D_runs))
+    MBF_std = float(np.std(D_runs))
+    AES     = float(np.mean(aes_runs)) if aes_runs else np.nan
+    AES_std = float(np.std(aes_runs))  if aes_runs else np.nan
 
-    print(f"  SR={SR*100:.1f}%  MBF={MBF:.6f}  AES={AES:.0f}")
+    print(f"  SR={SR*100:.1f}%  MBF={MBF:.6f}+/-{MBF_std:.6f}  AES={AES:.0f}+/-{AES_std:.0f}")
 
     return {
-        "SR": SR, "MBF": MBF, "AES": AES,
+        "SR": SR, "MBF": MBF, "MBF_std": MBF_std,
+        "AES": AES, "AES_std": AES_std,
         "D_best":         best_D,
         "best_hist_D":    best_hist_D,
         "best_hist_Dbest":best_hist_Dbest,
@@ -290,7 +266,6 @@ def grid_search_da(
         print(f"T0={T0}, alpha={alpha}, epsilon={epsilon}, "
               f"delta={delta}, I={I}, Tmin={Tmin}")
 
-        # 100 execuções para SR / MBF / AES
         metrics = run_100_execucoes_da(
             data_vectors=data_vectors, NC=NC, D_ref=D_global_ref,
             T0=T0, alpha=alpha, epsilon=epsilon,
@@ -298,7 +273,6 @@ def grid_search_da(
             tol=tol, Nexec=Nexec, base_seed=0
         )
 
-        # Medição de tempo (N_rep repetições, seed=0)
         print(f"  -> Medindo tempo ({N_rep} repetições)...")
         t_runs = []
         for _ in range(N_rep):
@@ -314,17 +288,16 @@ def grid_search_da(
         tempo_std   = float(np.std(t_runs))
         print(f"  -> Tempo médio: {tempo_medio:.3f} s | Std: {tempo_std:.3f} s")
 
-        # Salva arquivos
         combo_tag = f"T0{T0}_a{alpha}_e{epsilon}_d{delta}_I{I}_Tmin{Tmin}".replace(".", "p")
         history_D_path     = os.path.join(local_path, f"da_history_D_{combo_tag}.npy")
         history_Dbest_path = os.path.join(local_path, f"da_history_Dbest_{combo_tag}.npy")
         history_time_path  = os.path.join(local_path, f"da_history_time_{combo_tag}.npy")
+        history_J_path     = os.path.join(local_path, f"da_history_J_{combo_tag}.npy")
+        history_T_path     = os.path.join(local_path, f"da_history_T_{combo_tag}.npy")
 
         np.save(history_D_path,     metrics["best_hist_D"])
         np.save(history_Dbest_path, metrics["best_hist_Dbest"])
         np.save(history_time_path,  metrics["best_hist_time"])
-        history_J_path = os.path.join(local_path, f"da_history_J_{combo_tag}.npy")
-        history_T_path = os.path.join(local_path, f"da_history_T_{combo_tag}.npy")
         np.save(history_J_path,     metrics["best_hist_J"])
         np.save(history_T_path,     metrics["best_hist_T"])
 
@@ -340,7 +313,9 @@ def grid_search_da(
             "Nexec":              Nexec,
             "SR":                 metrics["SR"],
             "MBF":                metrics["MBF"],
+            "MBF_std":            metrics["MBF_std"],
             "AES":                metrics["AES"],
+            "AES_std":            metrics["AES_std"],
             "D_best":             metrics["D_best"],
             "D_global_reference": float(D_global_ref),
             "tempo_medio_s":      tempo_medio,
@@ -355,8 +330,8 @@ def grid_search_da(
         df_row = pd.DataFrame([row])
         write_header = not os.path.exists(csv_path)
         df_row.to_csv(csv_path, mode="a", header=write_header, index=False)
-        print(f"  -> SR={metrics['SR']*100:.1f}% | MBF={metrics['MBF']:.6f} | "
-              f"AES={metrics['AES']:.0f} | salvo no CSV")
+        print(f"  -> SR={metrics['SR']*100:.1f}% | MBF={metrics['MBF']:.6f}+/-{metrics['MBF_std']:.6f} | "
+              f"AES={metrics['AES']:.0f}+/-{metrics['AES_std']:.0f} | salvo no CSV")
 
         if metrics["D_best"] < best_global_value:
             best_global_value = metrics["D_best"]
@@ -366,7 +341,9 @@ def grid_search_da(
                 "D_best":      metrics["D_best"],
                 "SR":          metrics["SR"],
                 "MBF":         metrics["MBF"],
+                "MBF_std":     metrics["MBF_std"],
                 "AES":         metrics["AES"],
+                "AES_std":     metrics["AES_std"],
                 "best_hist_D":     metrics["best_hist_D"],
                 "best_hist_Dbest": metrics["best_hist_Dbest"],
                 "best_hist_time":  metrics["best_hist_time"],
@@ -378,7 +355,9 @@ def grid_search_da(
                 T0=T0, alpha=alpha, epsilon=epsilon,
                 delta=delta, I=I, Tmin=Tmin,
                 D_best=metrics["D_best"],
-                SR=metrics["SR"], MBF=metrics["MBF"], AES=metrics["AES"],
+                SR=metrics["SR"],
+                MBF=metrics["MBF"],     MBF_std=metrics["MBF_std"],
+                AES=metrics["AES"],     AES_std=metrics["AES_std"],
                 best_hist_D=metrics["best_hist_D"],
                 best_hist_Dbest=metrics["best_hist_Dbest"],
                 best_hist_time=metrics["best_hist_time"],
@@ -414,7 +393,6 @@ def plot_best_solution_da(data_vectors, cluster_centers, best_record):
     history_T     = np.asarray(best_record["best_hist_T"])
     D_ref         = J_hard(cluster_centers, data_vectors)
 
-    # Gráfico 1: -J, D e Temperatura por iteração (estilo original) + linha de referência
     plt.figure(figsize=(10, 6))
     plt.plot(-history_J, 'r-', label='-J')
     plt.plot(history_D,  'k-', label='D')
@@ -427,7 +405,6 @@ def plot_best_solution_da(data_vectors, cluster_centers, best_record):
     plt.savefig(os.path.join(local_path, "da_convergencia_original.png"), dpi=150)
     plt.show()
 
-    # Gráfico 2: -J, D e Temperatura por tempo (s) + linha de referência
     plt.figure(figsize=(10, 6))
     plt.plot(history_time, -history_J, 'r-', label='-J')
     plt.plot(history_time,  history_D, 'k-', label='D')
@@ -440,7 +417,6 @@ def plot_best_solution_da(data_vectors, cluster_centers, best_record):
     plt.savefig(os.path.join(local_path, "da_convergencia_original_tempo.png"), dpi=150)
     plt.show()
 
-    # Gráfico 3: D e D_best por iteração
     plt.figure(figsize=(10, 6))
     plt.plot(history_D,     'r-', label='D (distorção média)')
     plt.plot(history_Dbest, 'k-', label='Melhor D acumulado')
@@ -452,7 +428,6 @@ def plot_best_solution_da(data_vectors, cluster_centers, best_record):
     plt.savefig(os.path.join(local_path, "da_convergencia_iteracao.png"), dpi=150)
     plt.show()
 
-    # Gráfico 4: D e D_best por tempo (s)
     plt.figure(figsize=(10, 6))
     plt.plot(history_time, history_D,     'r-', label='D (distorção média)')
     plt.plot(history_time, history_Dbest, 'k-', label='Melhor D acumulado')
@@ -499,14 +474,14 @@ def medir_tempo_da(data_vectors, NC, best_record, N_rep=10):
 # =========================================================
 if __name__ == "__main__":
 
-    NC_number = 8   # ← mude aqui para 4, 8, 16, etc.
+    NC_number = 8   # <- mude aqui para 4, 8, 16, etc.
 
-    # Diretório de saída automático baseado no NC_number
     local_path = os.path.expanduser(f"~/cpe723_da_nc{NC_number}")
     os.makedirs(local_path, exist_ok=True)
-    csv_path_da = os.path.join(local_path, "grid_search_da_results.csv")
+    csv_path_da         = os.path.join(local_path, "grid_search_da_results.csv")
     best_record_path_da = os.path.join(local_path, "best_record_da.npz")
     print(f"Resultados salvos em: {local_path}")
+
     data_vectors, cluster_centers = generate_data_r3(P=100, NC=NC_number, sigma=0.1, seed=1)
     D_ref = J_hard(cluster_centers, data_vectors)
     print(f"Custo com centros verdadeiros: {D_ref:.6f}")
@@ -533,14 +508,14 @@ if __name__ == "__main__":
 
     print("\n===== Top 10 combinações (por SR) =====")
     cols_show = ["T0","alpha","epsilon","delta","I","Tmin",
-                 "SR","MBF","AES","D_best","tempo_medio_s"]
+                 "SR","MBF","MBF_std","AES","AES_std","D_best","tempo_medio_s"]
     cols_ok = [c for c in cols_show if c in df_results.columns]
     print(df_results[cols_ok].head(10).to_string())
 
     if best_record is not None:
         print("\n===== Melhor combinação =====")
         for k in ["T0","alpha","epsilon","delta","I","Tmin",
-                  "SR","MBF","AES","D_best"]:
+                  "SR","MBF","MBF_std","AES","AES_std","D_best"]:
             if k in best_record:
                 print(f"  {k} = {best_record[k]}")
         plot_best_solution_da(data_vectors, cluster_centers, best_record)

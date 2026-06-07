@@ -15,9 +15,7 @@ import time
 # =========================================================
 # 0. Diretório de saída local
 # =========================================================
-# local_path é definido dinamicamente no __main__ com base em NC_number
-local_path = None  # será atualizado em __main__
-# csv_path_es e best_record_path_es são definidos em __main__
+local_path = None
 csv_path_es = None
 best_record_path_es = None
 print("Resultados ES serão salvos em:")
@@ -48,25 +46,6 @@ def J_hard(X, Y):
 
 # =========================================================
 # 3. Uma execução do ES
-#
-# Parâmetros:
-#   Nind        — tamanho da população (mu)
-#   Npais       — pais sorteados por geração (seleção uniforme)
-#   Nfilhos     — filhos gerados por geração (lambda)
-#   Nsob        — sobreviventes — estratégia (mu, lambda)
-#   Nger        — número máximo de gerações
-#   epson0      — sigma_min
-#   tau1        — fator global de aprendizado do sigma (None = 1/sqrt(2*Nd))
-#   tau2        — fator individual de aprendizado do sigma (None = 1/sqrt(2*sqrt(Nd)))
-#   sigma0_low  — limite inferior da inicialização dos sigmas
-#   sigma0_high — limite superior da inicialização dos sigmas
-#   clip_val    — limita centróides ao intervalo [-clip_val, +clip_val] após mutação
-#   patience    — para se sem melhora por N gerações consecutivas no D_best
-#                 OU se já atingiu a tolerância e ficou N gerações sem nova melhora
-#   prec        — probabilidade de recombinação (0 a 1)
-#   pmut        — probabilidade de mutação (0 a 1)
-#   tol         — tolerância para considerar sucesso (|J - J_ref| <= tol)
-#   J_ref       — custo de referência (centros verdadeiros)
 # =========================================================
 def run_es(
     data_vectors,
@@ -98,7 +77,6 @@ def run_es(
     if tau2 is None:
         tau2 = 1.0 / np.sqrt(2 * np.sqrt(Nd))
 
-    # Inicialização — igual ao DA: N(0,1)
     x_ini     = rng.standard_normal((Nind, Nd))
     sigma_ini = sigma0_low + (sigma0_high - sigma0_low) * rng.random((Nind, Nd))
     ind = np.hstack([x_ini, sigma_ini])
@@ -119,19 +97,17 @@ def run_es(
     history_D     = np.zeros(Nger)
     history_Dbest = np.zeros(Nger)
     history_time  = np.zeros(Nger)
-    sem_melhora         = 0   # gerações sem melhora no D_best (geral)
-    sem_melhora_pos_suc = 0   # gerações sem melhora após atingir tolerância
+    sem_melhora         = 0
+    sem_melhora_pos_suc = 0
     ncalls        = Nind
     isuc          = 0
     ncalls_suc    = 0
 
     for g in range(Nger):
 
-        # Seleção de pais: sorteio aleatório uniforme
         idx_pais = rng.integers(len(ind), size=Npais)
         pais     = ind[idx_pais]
 
-        # Recombinação (com probabilidade prec)
         i1s      = rng.integers(Npais, size=Nfilhos)
         i2s      = rng.integers(Npais, size=Nfilhos)
         mask_rec = rng.random(Nfilhos) < prec
@@ -149,7 +125,6 @@ def run_es(
         filhos[~mask_rec, :Nd] = pais[i1s[~mask_rec], :Nd]
         filhos[~mask_rec, Nd:] = pais[i1s[~mask_rec], Nd:]
 
-        # Mutação (com probabilidade pmut por filho)
         mask_mut = rng.random(Nfilhos) < pmut
         if mask_mut.any():
             r_comum = rng.standard_normal((Nfilhos, 1))
@@ -162,48 +137,41 @@ def run_es(
             filhos[mask_mut, :Nd] += shat[mask_mut] * r_mut[mask_mut]
             filhos[mask_mut, Nd:]  = shat[mask_mut]
 
-        # Clip
         if clip_val is not None:
             filhos[:, :Nd] = np.clip(filhos[:, :Nd], -clip_val, clip_val)
 
-        # Avaliação dos filhos
         J_fil  = custo_batch(filhos)
         ncalls += Nfilhos
 
-        # Seleção (mu, lambda)
         idx_sort = np.argsort(J_fil)
         ind      = filhos[idx_sort[:Nsob]]
 
         if J_fil[idx_sort[0]] < D_best:
             D_best      = J_fil[idx_sort[0]]
             Y_best      = ind[0, :Nd].reshape(3, NC).copy()
-            sem_melhora = 0           # reseta contador geral
-            if isuc == 0:             # pos-sucesso NAO reseta apos atingir tolerancia
+            sem_melhora = 0
+            if isuc == 0:
                 sem_melhora_pos_suc = 0
         else:
             sem_melhora += 1
-        if isuc == 1:                 # conta sempre apos tolerancia atingida
+        if isuc == 1:
             sem_melhora_pos_suc += 1
 
         history_D[g]     = float(np.mean(J_fil))
         history_Dbest[g] = D_best
         history_time[g]  = time.perf_counter() - start_time
 
-        # Verifica sucesso
         if isuc == 0 and J_ref is not None:
             if abs(D_best - J_ref) <= tol:
                 isuc       = 1
                 ncalls_suc = ncalls
 
-        # Critério de parada 1: patience geral (sem melhora em qualquer momento)
         if sem_melhora >= patience:
             history_D     = history_D[:g+1]
             history_Dbest = history_Dbest[:g+1]
             history_time  = history_time[:g+1]
             break
 
-        # Critério de parada 2: patience pós-sucesso
-        # (já atingiu tolerância e ficou N gerações sem nova melhora)
         if isuc == 1 and sem_melhora_pos_suc >= patience:
             history_D     = history_D[:g+1]
             history_Dbest = history_Dbest[:g+1]
@@ -216,7 +184,7 @@ def run_es(
     return D_best, Y_best, history_D, history_Dbest, history_time, isuc, ncalls_suc
 
 # =========================================================
-# 4. Loop de 100 execuções — calcula SR, MBF, AES
+# 4. Loop de 100 execuções — calcula SR, MBF, AES e desvios
 # =========================================================
 def run_100_execucoes(
     data_vectors,
@@ -264,16 +232,20 @@ def run_100_execucoes(
         if (i + 1) % 10 == 0:
             print(f"    {i+1}/{Nexec} execuções concluídas")
 
-    SR  = float(np.mean(isuc_runs))
-    MBF = float(np.mean(J_runs))
-    AES = float(np.mean(aes_runs)) if aes_runs else np.nan
+    SR      = float(np.mean(isuc_runs))
+    MBF     = float(np.mean(J_runs))
+    MBF_std = float(np.std(J_runs))
+    AES     = float(np.mean(aes_runs)) if aes_runs else np.nan
+    AES_std = float(np.std(aes_runs))  if aes_runs else np.nan
 
-    print(f"  SR={SR*100:.1f}%  MBF={MBF:.6f}  AES={AES:.0f}")
+    print(f"  SR={SR*100:.1f}%  MBF={MBF:.6f}+/-{MBF_std:.6f}  AES={AES:.0f}+/-{AES_std:.0f}")
 
     return {
-        "SR":  SR,
-        "MBF": MBF,
-        "AES": AES,
+        "SR":      SR,
+        "MBF":     MBF,
+        "MBF_std": MBF_std,
+        "AES":     AES,
+        "AES_std": AES_std,
         "J_best":         best_J,
         "best_hist_D":    best_hist_D,
         "best_hist_Dbest":best_hist_Dbest,
@@ -351,7 +323,6 @@ def grid_search_es(
         tau1_real = tau1 if tau1 is not None else 1.0 / np.sqrt(2 * Nd)
         tau2_real = tau2 if tau2 is not None else 1.0 / np.sqrt(2 * np.sqrt(Nd))
 
-        # Validações
         if Nsob > Nind:
             print(f"[{idx}/{total}] Pulando: Nsob={Nsob} > Nind={Nind}")
             continue
@@ -446,7 +417,9 @@ def grid_search_es(
             "Nexec":              Nexec,
             "SR":                 metrics["SR"],
             "MBF":                metrics["MBF"],
+            "MBF_std":            metrics["MBF_std"],
             "AES":                metrics["AES"],
+            "AES_std":            metrics["AES_std"],
             "J_best":             metrics["J_best"],
             "J_global_reference": float(J_global_ref),
             "tempo_medio_s":      tempo_medio,
@@ -459,8 +432,8 @@ def grid_search_es(
         df_row = pd.DataFrame([row])
         write_header = not os.path.exists(csv_path)
         df_row.to_csv(csv_path, mode="a", header=write_header, index=False)
-        print(f"  -> SR={metrics['SR']*100:.1f}% | MBF={metrics['MBF']:.6f} | "
-              f"AES={metrics['AES']:.0f} | salvo no CSV")
+        print(f"  -> SR={metrics['SR']*100:.1f}% | MBF={metrics['MBF']:.6f}+/-{metrics['MBF_std']:.6f} | "
+              f"AES={metrics['AES']:.0f}+/-{metrics['AES_std']:.0f} | salvo no CSV")
 
         if metrics["J_best"] < best_global_value:
             best_global_value = metrics["J_best"]
@@ -475,7 +448,9 @@ def grid_search_es(
                 "J_best":      metrics["J_best"],
                 "SR":          metrics["SR"],
                 "MBF":         metrics["MBF"],
+                "MBF_std":     metrics["MBF_std"],
                 "AES":         metrics["AES"],
+                "AES_std":     metrics["AES_std"],
                 "best_hist_D":     metrics["best_hist_D"],
                 "best_hist_Dbest": metrics["best_hist_Dbest"],
                 "best_hist_time":  metrics["best_hist_time"],
@@ -490,7 +465,9 @@ def grid_search_es(
                 clip_val=str(clip_val), patience=patience,
                 prec=prec, pmut=pmut,
                 J_best=metrics["J_best"],
-                SR=metrics["SR"], MBF=metrics["MBF"], AES=metrics["AES"],
+                SR=metrics["SR"],
+                MBF=metrics["MBF"], MBF_std=metrics["MBF_std"],
+                AES=metrics["AES"], AES_std=metrics["AES_std"],
                 best_hist_D=metrics["best_hist_D"],
                 best_hist_Dbest=metrics["best_hist_Dbest"],
                 best_hist_time=metrics["best_hist_time"],
@@ -549,7 +526,7 @@ def plot_best_solution_es(data_vectors, cluster_centers, best_record):
 # =========================================================
 if __name__ == "__main__":
 
-    NC_number = 4   # <- mude aqui para 4, 8, 16, etc.
+    NC_number = 8   # <- mude aqui para 4, 8, 16, etc.
 
     local_path = os.path.expanduser(f"~/cpe723_es_nc{NC_number}")
     os.makedirs(local_path, exist_ok=True)
@@ -582,7 +559,7 @@ if __name__ == "__main__":
     #     sigma0_low_values  = [0.1],
     #     sigma0_high_values = [0.5],
     #     clip_val_values    = [None],
-    #     patience_values    = [10],
+    #     patience_values    = [20],
     #     prec_values        = [1.0],
     #     pmut_values        = [1.0],
     #     tol=1e-2,
@@ -610,7 +587,7 @@ if __name__ == "__main__":
     #     sigma0_low_values  = [0.1],
     #     sigma0_high_values = [0.5],
     #     clip_val_values    = [None],
-    #     patience_values    = [10],
+    #     patience_values    = [20],
     #     prec_values        = [1.0],
     #     pmut_values        = [1.0],
     #     tol=1e-2,
@@ -620,45 +597,17 @@ if __name__ == "__main__":
     #     best_record_path=best_record_path_es,
     # )
 
-    # ---------------------------------------------------------
-    # Fase 3 - nc4: Variação de prec e pmut
-    # ---------------------------------------------------------
-    df_results, best_record = grid_search_es(
-        data_vectors=data_vectors,
-        cluster_centers=cluster_centers,
-        NC=NC_number,
-        Nind_values        = [50],
-        Npais_values       = [50],
-        Nfilhos_values     = [700],
-        Nsob_values        = [50],
-        Nger_values        = [800],
-        epson0_values      = [1e-8],
-        tau1_values        = [None],
-        tau2_values        = [None],
-        sigma0_low_values  = [0.1],
-        sigma0_high_values = [0.5],
-        clip_val_values    = [None],
-        patience_values    = [10],
-        prec_values        = [0.7, 0.9, 1.0],
-        pmut_values        = [0.7, 0.9, 1.0],
-        tol=1e-2,
-        Nexec=Nexec,
-        N_rep=N_rep_timing,
-        csv_path=csv_path_es,
-        best_record_path=best_record_path_es,
-    )
-
     # # ---------------------------------------------------------
-    # # Fase 3 - nc8: Variação de prec e pmut
+    # # Fase 3 - nc4: Variação de prec e pmut
     # # ---------------------------------------------------------
     # df_results, best_record = grid_search_es(
     #     data_vectors=data_vectors,
     #     cluster_centers=cluster_centers,
     #     NC=NC_number,
-    #     Nind_values        = [100],
-    #     Npais_values       = [100],
+    #     Nind_values        = [50],
+    #     Npais_values       = [50],
     #     Nfilhos_values     = [700],
-    #     Nsob_values        = [100],
+    #     Nsob_values        = [50],
     #     Nger_values        = [800],
     #     epson0_values      = [1e-8],
     #     tau1_values        = [None],
@@ -666,7 +615,7 @@ if __name__ == "__main__":
     #     sigma0_low_values  = [0.1],
     #     sigma0_high_values = [0.5],
     #     clip_val_values    = [None],
-    #     patience_values    = [5],
+    #     patience_values    = [10],
     #     prec_values        = [0.7, 0.9, 1.0],
     #     pmut_values        = [0.7, 0.9, 1.0],
     #     tol=1e-2,
@@ -676,17 +625,45 @@ if __name__ == "__main__":
     #     best_record_path=best_record_path_es,
     # )
 
+    # ---------------------------------------------------------
+    # Fase 3 - nc8: Variação de prec e pmut
+    # ---------------------------------------------------------
+    df_results, best_record = grid_search_es(
+        data_vectors=data_vectors,
+        cluster_centers=cluster_centers,
+        NC=NC_number,
+        Nind_values        = [100],
+        Npais_values       = [100],
+        Nfilhos_values     = [700],
+        Nsob_values        = [100],
+        Nger_values        = [800],
+        epson0_values      = [1e-8],
+        tau1_values        = [None],
+        tau2_values        = [None],
+        sigma0_low_values  = [0.1],
+        sigma0_high_values = [0.5],
+        clip_val_values    = [None],
+        patience_values    = [20],
+        prec_values        = [0.7, 0.9, 1.0],
+        pmut_values        = [0.7, 0.9, 1.0],
+        tol=1e-2,
+        Nexec=Nexec,
+        N_rep=N_rep_timing,
+        csv_path=csv_path_es,
+        best_record_path=best_record_path_es,
+    )
+
     print("\n===== Top 10 combinações (por SR) =====")
     cols_show = ["Nind","Npais","Nfilhos","Nsob","Nger",
                  "prec","pmut","patience","clip_val",
-                 "SR","MBF","AES","J_best","tempo_medio_s"]
+                 "SR","MBF","MBF_std","AES","AES_std","J_best","tempo_medio_s"]
     cols_ok = [c for c in cols_show if c in df_results.columns]
     print(df_results[cols_ok].head(10).to_string())
 
     if best_record is not None:
         print("\n===== Melhor combinação =====")
         for k in ["Nind","Npais","Nfilhos","Nsob","Nger",
-                  "prec","pmut","patience","SR","MBF","AES","J_best"]:
+                  "prec","pmut","patience","SR","MBF","MBF_std","AES","AES_std","J_best"]:
             if k in best_record:
                 print(f"  {k} = {best_record[k]}")
         plot_best_solution_es(data_vectors, cluster_centers, best_record)
