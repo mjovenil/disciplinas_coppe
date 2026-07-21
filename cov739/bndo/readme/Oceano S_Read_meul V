@@ -1,0 +1,13 @@
+
+CONTROLE DE QUALIDADE
+
+Primeiro dígito corresponde ao QC do BNDO, o segundo ao QC estabelecido pela origem(convertido para o QC BNDO) e o terceiro informa se o dado foi verificado ( 0 -> não qualificado, 1 -> apenas origem e 2 -> pelo CHM).
+Valor de qualificação do dado resultante da analise assumindo os seguintes valores: 
+0- sem qualidade;
+1- sem qualidade, pre-processado por software do equipamento;
+2- correto;3- inconsistente; 
+4- duvidoso; 
+5- alterado (interpolação); 
+6- alterado por inferência;
+7- característica especial;
+9- sem valor.

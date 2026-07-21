@@ -100,6 +100,26 @@ def melhor_hib_sr100(df):
         return sr1.sort_values("AES").iloc[0]
     return df.sort_values("SR", ascending=False).iloc[0]
 
+def fmt_std(val, std, col, decimals=5):
+    """Formata 'val±std' ou 'val' se std ausente/zero."""
+    try:
+        v = float(val)
+        s = float(std)
+    except (TypeError, ValueError):
+        return f"{val:.{decimals}f}" if val is not None else "--"
+    if np.isnan(v):
+        return "--"
+    if np.isnan(s) or s == 0:
+        # MBF_std ~0 para DA NC=4: mostra ≈0
+        if col == "MBF" and s < 1e-10:
+            return f"{v:.5f} (≈0)"
+        return f"{v:.{decimals}f}"
+    if col == "MBF":
+        return f"{v:.5f}±{s:.5f}"
+    if col == "AES":
+        return f"{v:.0f}±{s:.0f}"
+    return f"{v:.{decimals}f}±{s:.{decimals}f}"
+
 # =========================================================
 # 4. Gráfico 1 — Comparativo SR, MBF, Tempo (barras agrupadas)
 # =========================================================
@@ -192,7 +212,6 @@ def grafico_boxplot_sr():
 
     fig, ax = plt.subplots(figsize=(11, 6))
 
-    # Desenha cada violino manualmente para controlar ordem e posição
     for i, alg in enumerate(algs_order):
         for nc in ncs_order:
             subset = df_plot[(df_plot["Algoritmo"]==alg) &
@@ -204,7 +223,6 @@ def grafico_boxplot_sr():
             vals  = subset.values
 
             if subset.std() < 0.5:
-                # Grupo constante: barra fina
                 val = vals[0]
                 w   = 0.15
                 ax.fill_betweenx([val-1, val+1], x_c-w, x_c+w,
@@ -212,17 +230,14 @@ def grafico_boxplot_sr():
                 ax.hlines(val, x_c-w, x_c+w,
                           colors="gray", linewidth=1.2, alpha=0.9)
             else:
-                # Violino via KDE usando statsmodels (sem scipy)
                 y_min = max(vals.min() - 5, -2)
                 y_max = min(vals.max() + 5, 105)
                 y_pts = np.linspace(y_min, y_max, 200)
-                # KDE manual com kernel gaussiano
                 bw = max(vals.std() * 0.3, 1.0)
                 dens = np.zeros_like(y_pts)
                 for v in vals:
                     dens += np.exp(-0.5 * ((y_pts - v) / bw) ** 2)
                 dens /= (len(vals) * bw * np.sqrt(2 * np.pi))
-                # Normaliza largura
                 w_max  = 0.18
                 dens_n = dens / dens.max() * w_max
                 ax.fill_betweenx(y_pts, x_c - dens_n, x_c + dens_n,
@@ -230,17 +245,14 @@ def grafico_boxplot_sr():
                 ax.plot(x_c - dens_n, y_pts, color=cor, linewidth=0.8, alpha=0.7)
                 ax.plot(x_c + dens_n, y_pts, color=cor, linewidth=0.8, alpha=0.7)
 
-    # Pontos individuais sobrepostos
     sns.stripplot(data=df_plot, x="Algoritmo", y="SR (%)",
                   hue="NC", dodge=True, order=algs_order,
                   palette={"NC=4": "#1a6fad", "NC=8": "#d62728"},
                   size=5, alpha=0.7, jitter=True, ax=ax)
 
-    # Eixo x com ordem correta
     ax.set_xticks(range(len(algs_order)))
     ax.set_xticklabels(algs_order)
 
-    # Anotações numéricas: mediana e n por grupo
     ncs    = ["NC=4", "NC=8"]
     offset = {"NC=4": -0.2, "NC=8": 0.2}
 
@@ -249,17 +261,15 @@ def grafico_boxplot_sr():
             subset = df_plot[(df_plot["Algoritmo"]==alg) & (df_plot["NC"]==nc)]["SR (%)"]
             if subset.empty:
                 continue
-            mediana = subset.median()
-            n       = len(subset)
-            x_pos   = i + offset[nc]
-            # linha da mediana
-            ax.hlines(mediana, x_pos - 0.08, x_pos + 0.08,
+            media = subset.mean()
+            n     = len(subset)
+            x_pos = i + offset[nc]
+            ax.hlines(media, x_pos - 0.08, x_pos + 0.08,
                       colors="black", linewidth=1.5, zorder=5)
-            # anotação: mediana e n
-            texto = "med=" + f"{mediana:.0f}" + "%  n=" + str(n)
+            texto = "mean=" + f"{media:.0f}" + "%  n=" + str(n)
             ax.annotate(texto,
-                        xy=(x_pos, mediana),
-                        xytext=(x_pos + 0.13, mediana + 3),
+                        xy=(x_pos, media),
+                        xytext=(x_pos + 0.13, media + 3),
                         fontsize=7.5, ha="left", va="bottom",
                         color="black",
                         bbox=dict(boxstyle="round,pad=0.2",
@@ -272,7 +282,6 @@ def grafico_boxplot_sr():
     ax.set_xlabel("")
     ax.set_ylim(-5, 115)
 
-    # Legenda limpa (remove duplicatas do stripplot)
     handles, labels = ax.get_legend_handles_labels()
     seen = {}
     for h, l in zip(handles, labels):
@@ -289,14 +298,11 @@ def grafico_boxplot_sr():
 # 6. Gráfico 3 — Scatter SR vs Tempo
 # =========================================================
 def grafico_scatter_sr_tempo():
-    """Bubble chart: tamanho do marcador proporcional ao numero de pontos
-    sobrepostos na mesma regiao (SR x tempo arredondados)."""
     from matplotlib.lines import Line2D
 
     fig, ax = plt.subplots(figsize=(11, 6))
     legend_handles = []
 
-    # Coleta todos os pontos
     todos = []
     for alg_key, label, cor in [("da","DA",COR_DA),
                                   ("es","ES",COR_ES),
@@ -317,7 +323,6 @@ def grafico_scatter_sr_tempo():
     df_all["sr_r"]    = df_all["sr"].round(0)
     df_all["tempo_r"] = df_all["tempo"].round(1)
 
-    # Conta sobreposições por grupo
     contagem = (df_all.groupby(["alg","nc","cor","label","sr_r","tempo_r"])
                       .size().reset_index(name="n"))
 
@@ -341,23 +346,19 @@ def grafico_scatter_sr_tempo():
                         fontsize=7, ha="center", va="center",
                         color="white", fontweight="bold")
 
-    # Conta combinações por algoritmo (NC=4 + NC=8)
     n_comb = {}
     for alg_key, label in [("da","DA"),("es","ES"),("hib","Híbrido")]:
         total = sum(len(dados[nc][alg_key]) for nc in [4,8]
                     if dados[nc][alg_key] is not None)
         n_comb[label] = total
 
-    # Legenda algoritmo com contagem de combinações
     for label, cor in [("DA",COR_DA),("ES",COR_ES),("Híbrido",COR_HIB)]:
         legend_handles.append(Line2D([0],[0], marker="o", color="w",
                                      markerfacecolor=cor, markersize=10,
                                      label=f"{label}  ({n_comb[label]} comb.)"))
-    # Legenda NC
     for nc, mk in [(4,"o"),(8,"s")]:
         legend_handles.append(Line2D([0],[0], marker=mk, color="gray",
                                      markersize=10, label=f"NC={nc}", linestyle="None"))
-    # Legenda tamanho de referência
     for n_ref, lbl in [(1,"1 comb."),(3,"3 comb."),(max(n_max,6),f"{n_max}+ comb.")]:
         n_val = min(n_ref, n_max)
         legend_handles.append(Line2D([0],[0], marker="o", color="w",
@@ -544,6 +545,7 @@ def grafico_convergencia_comparativo():
 
 # =========================================================
 # 10. Gráfico 7 — Tabela visual NC=4 e NC=8
+#     Colunas: NC | Algoritmo | Parâmetros | SR | MBF±std | AES±std | Tempo
 # =========================================================
 def grafico_tabela_resultados():
     linhas = []
@@ -559,38 +561,56 @@ def grafico_tabela_resultados():
                 continue
 
             if alg_key == "da":
-                params = f"T0={b['T0']}, alpha={b['alpha']}"
+                params = f"T0={b['T0']}, α={b['alpha']}"
             elif alg_key == "es":
-                params = f"Nind={b['Nind']}, Nfil={b['Nfilhos']}"
+                params = f"μ={b['Nind']}, λ={b['Nfilhos']}"
             else:
-                params = f"T_da={b['T_da']}, alpha_da={b['alpha_da']}"
+                params = f"T_DA={b['T_da']}, α_DA={b['alpha_da']}"
 
-            aes_str = f"{b['AES']:.0f}" if not (isinstance(b['AES'], float) and np.isnan(b['AES'])) else "--"
-            tempo_str = (f"{b['tempo_medio_s']*1000:.1f} ms"
-                         if b['tempo_medio_s'] < 0.5
-                         else f"{b['tempo_medio_s']:.2f} s")
+            # MBF ± std
+            mbf_std = b.get("MBF_std", float("nan"))
+            mbf_str = fmt_std(b["MBF"], mbf_std, "MBF")
+
+            # AES ± std  (NaN se SR=0 ou ausente)
+            aes_val = b.get("AES", float("nan"))
+            aes_std = b.get("AES_std", float("nan"))
+            if isinstance(aes_val, float) and np.isnan(aes_val):
+                aes_str = "--"
+            else:
+                aes_str = fmt_std(aes_val, aes_std, "AES")
+
+            # Tempo ± std
+            t_med = b["tempo_medio_s"]
+            t_std = b.get("tempo_std_s", float("nan"))
+            if t_med < 0.5:
+                t_str = f"{t_med*1000:.1f}±{t_std*1000:.1f} ms" if not np.isnan(t_std) else f"{t_med*1000:.1f} ms"
+            else:
+                t_str = f"{t_med:.3f}±{t_std:.3f} s" if not np.isnan(t_std) else f"{t_med:.3f} s"
 
             linhas.append([f"NC={nc}", alg_label, params,
                            f"{b['SR']*100:.0f}%",
-                           f"{b['MBF']:.5f}",
-                           aes_str, tempo_str])
+                           mbf_str, aes_str, t_str])
 
-    cols = ["NC", "Algoritmo", "Parametros", "SR", "MBF", "AES", "Tempo"]
-    cores_alg = {"DA": COR_DA+"33", "ES": COR_ES+"33", "Híbrido": COR_HIB+"33"}
+    cols = ["NC", "Algoritmo", "Parâmetros", "SR", "MBF±std", "AES±std", "Tempo±std"]
 
-    fig, ax = plt.subplots(figsize=(14, 0.6 * len(linhas) + 1.5))
+    fig, ax = plt.subplots(figsize=(16, 0.65 * len(linhas) + 1.8))
     ax.axis("off")
     tbl = ax.table(cellText=linhas, colLabels=cols,
                    cellLoc="center", loc="center", bbox=[0, 0, 1, 1])
     tbl.auto_set_font_size(False)
     tbl.set_fontsize(10)
 
+    # Cabeçalho escuro
     for j in range(len(cols)):
         tbl[0, j].set_facecolor("#2c3e50")
         tbl[0, j].set_text_props(color="white", fontweight="bold")
+
+    # Linhas coloridas por algoritmo
     for i, linha in enumerate(linhas, start=1):
         alg = linha[1]
-        c = COR_DA+"33" if alg=="DA" else COR_ES+"33" if alg=="ES" else COR_HIB+"33"
+        c = (COR_DA+"33" if alg == "DA"
+             else COR_ES+"33" if alg == "ES"
+             else COR_HIB+"33")
         for j in range(len(cols)):
             tbl[i, j].set_facecolor(c)
 
