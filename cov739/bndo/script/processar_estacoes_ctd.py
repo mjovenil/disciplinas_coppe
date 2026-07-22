@@ -349,6 +349,44 @@ def completar_condutividade(estacao: pd.DataFrame, latitude: float) -> pd.DataFr
     return estacao
 
 
+def completar_densidade_potencial(estacao: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calcula a densidade potencial (ρθ) — a densidade que a parcela de
+    água teria se fosse trazida adiabaticamente até a superfície (pressão
+    de referência = 0), removendo o efeito de compressão da pressão in
+    situ. Usa seawater.pden(S, T, P, pr=0), que já calcula internamente a
+    temperatura potencial necessária.
+
+    Diferente dos outros 'completar_*', aqui não há valor do BNDO para
+    comparar — o BNDO não fornece densidade potencial diretamente (só
+    'Temperatura Potencial' aparece nalguns arquivos) — então o cálculo
+    é sempre feito quando T, S e P estiverem disponíveis.
+    """
+    estacao = estacao.copy()
+    estacao["Densidade Potencial [kg/m³]"] = pd.NA
+
+    pode_calcular = (
+        estacao["Temperatura [°c]"].notna()
+        & estacao["Salinidade [psu]"].notna()
+        & estacao["Pressão [db]"].notna()
+    )
+
+    estacao["origem_rho_potencial"] = "ausente"
+    if pode_calcular.any():
+        estacao.loc[pode_calcular, "Densidade Potencial [kg/m³]"] = sw.pden(
+            estacao.loc[pode_calcular, "Salinidade [psu]"].values,
+            estacao.loc[pode_calcular, "Temperatura [°c]"].values,
+            estacao.loc[pode_calcular, "Pressão [db]"].values,
+            pr=0,
+        )
+        estacao.loc[pode_calcular, "origem_rho_potencial"] = "EOS-80, pr=0 (calculado)"
+
+    estacao["Densidade Potencial [kg/m³]"] = pd.to_numeric(
+        estacao["Densidade Potencial [kg/m³]"], errors="coerce"
+    )
+    return estacao
+
+
 def extrair_digito_qc(flag) -> "int | None":
     """
     Extrai o dígito de qualidade principal de uma flag de QC.
@@ -413,6 +451,103 @@ def aplicar_filtro_qc(estacao: pd.DataFrame, qc_minimo) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
+def gerar_figura_comparativa(perfis: dict, caminho_saida: Path, titulo: str,
+                              ylim: "tuple | None" = None,
+                              incluir_mini_pressao: bool = True) -> None:
+    """
+    Gera a figura comparativa dos perfis de CTD por região.
+
+    Parâmetros:
+        perfis: dicionário {regiao: DataFrame da estação processada}
+        caminho_saida: caminho do arquivo .png a ser salvo
+        titulo: título principal da figura
+        ylim: se fornecido, ex. (200, 0), restringe o eixo de profundidade
+              a essa faixa (usado para gerar a versão com zoom). Se None,
+              o eixo se ajusta automaticamente aos dados (perfil completo).
+        incluir_mini_pressao: se True, inclui o mini-grid 2x2 de
+            Profundidade x Pressão por região (só faz sentido na figura
+            de profundidade total; na versão com zoom raso, o trecho de
+            pressão é pouco informativo e por isso fica de fora).
+    """
+    parametros = [
+        ("Temperatura [°c]", "Temperatura [°C]", "Perfil de Temperatura"),
+        ("Salinidade [psu]", "Salinidade [psu]", "Perfil de Salinidade"),
+        ("Velocidade do som [m/s]", "Velocidade do som [m/s]", "Perfil de Velocidade do Som"),
+        ("Densidade ro [kg/m³]", "Densidade in situ [kg/m³]", "Perfil de Densidade in situ"),
+        ("Densidade Potencial [kg/m³]", "Densidade potencial [kg/m³]", "Perfil de Densidade Potencial"),
+        ("Condutividade [S/m]", "Condutividade [S/m]", "Perfil de Condutividade"),
+    ]
+
+    cores = {"Norte": "tab:red", "Nordeste": "tab:orange",
+             "Sudeste": "tab:green", "Sul": "tab:blue"}
+
+    # Limites de zona batimétrica mencionados em aula (quadro):
+    # ~30m (costeira rasa) / ~200m (plataforma continental) / ~2000m (ZEE)
+    LIMITES_ZONA_M = [30, 200, 2000]
+
+    if incluir_mini_pressao:
+        fig = plt.figure(figsize=(22, 11))
+        gs_principal = fig.add_gridspec(2, 4)
+        posicoes = [(0, 0), (0, 1), (0, 2), (0, 3), (1, 0), (1, 1)]
+    else:
+        fig = plt.figure(figsize=(18, 11))
+        gs_principal = fig.add_gridspec(2, 3)
+        posicoes = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
+
+    eixos = []
+    for (col, rotulo_x, titulo_painel), (linha, coluna) in zip(parametros, posicoes):
+        ax = fig.add_subplot(gs_principal[linha, coluna],
+                              sharey=eixos[0] if eixos else None)
+        for regiao, estacao in perfis.items():
+            if col in estacao.columns:
+                ax.plot(estacao[col], estacao["Profundidade [m]"],
+                        label=regiao, color=cores.get(regiao))
+        for prof_limite in LIMITES_ZONA_M:
+            if ylim is None or prof_limite <= max(ylim):
+                ax.axhline(y=prof_limite, color="gray", linestyle="--",
+                           linewidth=0.8, alpha=0.7)
+        ax.set_xlabel(rotulo_x)
+        ax.set_title(titulo_painel)
+        ax.grid(alpha=0.3)
+        eixos.append(ax)
+
+    eixos[0].set_ylabel("Profundidade [m]")
+    if ylim is not None:
+        eixos[0].set_ylim(*ylim)  # já na ordem invertida, ex. (200, 0)
+    else:
+        eixos[0].invert_yaxis()
+    # Rótulos das zonas, anotados só no primeiro painel para não poluir
+    for prof_limite, rotulo in zip(LIMITES_ZONA_M, ["~30 m", "~200 m", "~2000 m"]):
+        if ylim is None or prof_limite <= max(ylim):
+            eixos[0].text(eixos[0].get_xlim()[1], prof_limite, f" {rotulo}",
+                          color="gray", fontsize=7, va="center", ha="left")
+    eixos[0].legend()
+
+    if incluir_mini_pressao:
+        # 7º painel: mini-grid 2x2 com Profundidade x Pressão por região
+        # (escala própria — sobrepostas, as 4 curvas ficam quase
+        # coincidentes, o que não ajuda na comparação).
+        gs_pressao = gs_principal[1, 2].subgridspec(2, 2, hspace=0.6, wspace=0.5)
+        for idx, regiao in enumerate(["Norte", "Nordeste", "Sudeste", "Sul"]):
+            linha, coluna = divmod(idx, 2)
+            ax_mini = fig.add_subplot(gs_pressao[linha, coluna])
+            if regiao in perfis and "Pressão [db]" in perfis[regiao].columns:
+                estacao = perfis[regiao]
+                ax_mini.plot(estacao["Pressão [db]"], estacao["Profundidade [m]"],
+                             color=cores.get(regiao))
+            ax_mini.invert_yaxis()
+            ax_mini.set_title(regiao, fontsize=9)
+            ax_mini.tick_params(labelsize=7)
+            ax_mini.grid(alpha=0.3)
+
+        # 8º espaço sobra vazio (7 painéis usados de 8 disponíveis)
+        fig.add_subplot(gs_principal[1, 3]).axis("off")
+
+    fig.suptitle(titulo, fontsize=14)
+    fig.tight_layout()
+    fig.savefig(caminho_saida, dpi=150)
+
+
 def main():
     PASTA_SAIDA.mkdir(parents=True, exist_ok=True)
     perfis = {}
@@ -470,6 +605,12 @@ def main():
         print(f"  Densidade — origem: {n_bndo_rho} do BNDO, "
               f"{n_calc_rho} calculadas (EOS-80), {n_ausente_rho} ainda ausentes")
 
+        estacao = completar_densidade_potencial(estacao)
+        n_calc_rhop = (estacao["origem_rho_potencial"] == "EOS-80, pr=0 (calculado)").sum()
+        n_ausente_rhop = (estacao["origem_rho_potencial"] == "ausente").sum()
+        print(f"  Densidade potencial — {n_calc_rhop} calculadas (EOS-80, pr=0), "
+              f"{n_ausente_rhop} ainda ausentes")
+
         estacao = completar_condutividade(estacao, info["lat"])
         n_bndo_sigma = (estacao["origem_sigma"] == "BNDO").sum()
         n_calc_sigma = (estacao["origem_sigma"] == "PSS-78 (calculado)").sum()
@@ -497,67 +638,28 @@ def main():
         return
 
     # -----------------------------------------------------------------
-    # Gráfico comparativo: Temperatura, Salinidade, Velocidade do som,
-    # Densidade e Condutividade — todos os parâmetros pedidos ao BNDO,
-    # exceto profundidade/pressão (que já é o eixo vertical comum).
+    # Figura 1: perfil completo (toda a profundidade), com o mini-grid
+    # de Profundidade x Pressão por região.
     # -----------------------------------------------------------------
-    parametros = [
-        ("Temperatura [°c]", "Temperatura [°C]", "Perfil de Temperatura"),
-        ("Salinidade [psu]", "Salinidade [psu]", "Perfil de Salinidade"),
-        ("Velocidade do som [m/s]", "Velocidade do som [m/s]", "Perfil de Velocidade do Som"),
-        ("Densidade ro [kg/m³]", "Densidade [kg/m³]", "Perfil de Densidade"),
-        ("Condutividade [S/m]", "Condutividade [S/m]", "Perfil de Condutividade"),
-    ]
-
-    cores = {"Norte": "tab:red", "Nordeste": "tab:orange",
-             "Sudeste": "tab:green", "Sul": "tab:blue"}
-
-    fig = plt.figure(figsize=(18, 11))
-    gs_principal = fig.add_gridspec(2, 3)
-
-    # Os 5 primeiros painéis (T, S, c, ρ, σ) — todas as regiões sobrepostas,
-    # compartilhando o eixo de profundidade.
-    eixos = []
-    for i, (col, rotulo_x, titulo) in enumerate(parametros):
-        linha, coluna = divmod(i, 3)
-        ax = fig.add_subplot(gs_principal[linha, coluna],
-                              sharey=eixos[0] if eixos else None)
-        for regiao, estacao in perfis.items():
-            if col in estacao.columns:
-                ax.plot(estacao[col], estacao["Profundidade [m]"],
-                        label=regiao, color=cores.get(regiao))
-        ax.set_xlabel(rotulo_x)
-        ax.set_title(titulo)
-        ax.grid(alpha=0.3)
-        eixos.append(ax)
-
-    eixos[0].set_ylabel("Profundidade [m]")
-    eixos[0].invert_yaxis()  # afeta todos os eixos, pois compartilham o y
-    eixos[0].legend()
-
-    # 6º painel (posição [1,2]) subdividido em um mini-grid 2x2: um
-    # gráfico de Profundidade x Pressão por região, com escala própria
-    # (já que as 4 curvas são quase coincidentes num único gráfico
-    # compartilhado, tornando a comparação pouco útil).
-    gs_pressao = gs_principal[1, 2].subgridspec(2, 2, hspace=0.6, wspace=0.5)
-    for idx, regiao in enumerate(["Norte", "Nordeste", "Sudeste", "Sul"]):
-        linha, coluna = divmod(idx, 2)
-        ax_mini = fig.add_subplot(gs_pressao[linha, coluna])
-        if regiao in perfis and "Pressão [db]" in perfis[regiao].columns:
-            estacao = perfis[regiao]
-            ax_mini.plot(estacao["Pressão [db]"], estacao["Profundidade [m]"],
-                         color=cores.get(regiao))
-        ax_mini.invert_yaxis()
-        ax_mini.set_title(regiao, fontsize=9)
-        ax_mini.tick_params(labelsize=7)
-        ax_mini.grid(alpha=0.3)
-
-    fig.suptitle("Comparação de Perfis CTD por Região — Costa Brasileira", fontsize=14)
-    fig.tight_layout()
-
     caminho_figura = PASTA_SAIDA / "comparacao_perfis_ctd.png"
-    fig.savefig(caminho_figura, dpi=150)
-    print(f"\nGráfico comparativo salvo em: {caminho_figura.resolve()}")
+    gerar_figura_comparativa(
+        perfis, caminho_figura,
+        titulo="Comparação de Perfis CTD por Região — Costa Brasileira",
+        ylim=None, incluir_mini_pressao=True,
+    )
+    print(f"\nGráfico comparativo (perfil completo) salvo em: {caminho_figura.resolve()}")
+
+    # -----------------------------------------------------------------
+    # Figura 2: zoom nas duas faixas rasas (0-30m e 30-200m), onde as
+    # curvas ficam muito comprimidas na figura de profundidade total.
+    # -----------------------------------------------------------------
+    caminho_figura_zoom = PASTA_SAIDA / "comparacao_perfis_ctd_zoom_0-200m.png"
+    gerar_figura_comparativa(
+        perfis, caminho_figura_zoom,
+        titulo="Comparação de Perfis CTD por Região — Zoom 0-200 m",
+        ylim=(200, 0), incluir_mini_pressao=False,
+    )
+    print(f"Gráfico comparativo (zoom 0-200m) salvo em: {caminho_figura_zoom.resolve()}")
 
     # -----------------------------------------------------------------
     # Tabela-resumo
@@ -580,6 +682,7 @@ def main():
             "S mín/méd/máx [psu]": faixa("Salinidade [psu]"),
             "c mín/méd/máx [m/s]": faixa("Velocidade do som [m/s]"),
             "ρ mín/méd/máx [kg/m³]": faixa("Densidade ro [kg/m³]"),
+            "ρθ mín/méd/máx [kg/m³]": faixa("Densidade Potencial [kg/m³]"),
             "σ mín/méd/máx [S/m]": faixa("Condutividade [S/m]"),
             "P mín/méd/máx [db]": faixa("Pressão [db]"),
         })
