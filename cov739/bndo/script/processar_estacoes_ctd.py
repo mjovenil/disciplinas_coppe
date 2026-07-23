@@ -629,11 +629,31 @@ def plotar_com_origem(ax, x: pd.Series, y: pd.Series, origem: "pd.Series | None"
             inicio = i
 
 
-# Parâmetros na ordem pedida em aula: pressão, temperatura, salinidade,
-# densidade potencial, densidade in situ, condutividade, velocidade do som.
 # ---------------------------------------------------------------------------
 # COMPARAÇÃO COM A FÓRMULA TEÓRICA (gás ideal x fórmula geral de fluidos)
 # ---------------------------------------------------------------------------
+
+
+def _suavizar(serie: np.ndarray, janela: "int | None" = None) -> np.ndarray:
+    """
+    Suaviza uma série numérica com uma média móvel centrada, ANTES de
+    calcular qualquer derivada numérica sobre ela.
+
+    Isso é necessário porque a derivada de um sinal medido (com ruído de
+    sensor, por menor que seja) amplifica muito esse ruído — pequenas
+    flutuações entre pontos vizinhos, que já eram desprezíveis no valor
+    bruto, viram picos enormes quando divididas por um Δ pequeno. Suavizar
+    antes de diferenciar é a prática padrão para evitar isso.
+
+    O tamanho da janela se adapta ao número de pontos do perfil (perfis
+    maiores toleram uma janela maior sem perder a forma real da curva).
+    """
+    n = len(serie)
+    if janela is None:
+        janela = max(5, n // 20)
+        if janela % 2 == 0:
+            janela += 1
+    return pd.Series(serie).rolling(window=janela, center=True, min_periods=1).mean().to_numpy()
 
 
 def calcular_c_diferencas_finitas(estacao: pd.DataFrame) -> pd.DataFrame:
@@ -649,6 +669,8 @@ def calcular_c_diferencas_finitas(estacao: pd.DataFrame) -> pd.DataFrame:
     pura aplicada aos dados reais. Isso permite comparar a fórmula teórica
     diretamente com o valor empírico (Mackenzie) já calculado.
 
+    Pressão e densidade são suavizadas (ver _suavizar) antes da derivada,
+    para evitar que ruído de medição seja amplificado pela divisão.
     Pressão é convertida de dbar para Pa (1 dbar = 10.000 Pa) antes da
     derivada, para que o resultado saia em unidades corretas (m/s).
 
@@ -657,8 +679,8 @@ def calcular_c_diferencas_finitas(estacao: pd.DataFrame) -> pd.DataFrame:
     Δρ≈0 explode numericamente e não tem significado físico ali.
     """
     estacao = estacao.copy()
-    P_pa = estacao["Pressão [db]"].to_numpy() * 1.0e4
-    rho = estacao["Densidade ro [kg/m³]"].to_numpy()
+    P_pa = _suavizar(estacao["Pressão [db]"].to_numpy() * 1.0e4)
+    rho = _suavizar(estacao["Densidade ro [kg/m³]"].to_numpy())
 
     dP = np.gradient(P_pa)
     drho = np.gradient(rho)
@@ -816,32 +838,59 @@ def gerar_figura_dispersao_derivada(curvas: dict, caminho_saida: Path, titulo: s
     """
     Versão 'k=1' dos mesmos 5 painéis: em vez do valor da propriedade em
     si, plota a DERIVADA dY/dX (taxa de variação local), calculada por
-    diferenças finitas (numpy.gradient) ao longo do perfil.
+    diferenças finitas (numpy.gradient) sobre as séries SUAVIZADAS (ver
+    _suavizar) — sem suavizar antes, o ruído de medição em X e Y é
+    amplificado pela divisão e a derivada fica inutilizável (puro ruído).
 
     Um valor grande de |dY/dX| aponta uma região onde a propriedade X
     influencia fortemente a propriedade Y — por exemplo, um pico em
     |dc/dT| marca onde a temperatura mais afeta a velocidade do som
     naquele perfil (tipicamente perto da termoclina).
+
+    A escala vertical de cada painel é limitada ao intervalo entre os
+    percentis 2 e 98 dos valores calculados, para que eventuais picos
+    residuais isolados não dominem toda a escala e escondam o
+    comportamento típico da curva.
     """
     fig, eixos = plt.subplots(2, 3, figsize=(18, 11))
     eixos = eixos.flatten()
 
     for ax, (col_x, col_y, rotulo_x, rotulo_y, titulo_painel) in zip(eixos, PARAMETROS_DISPERSAO):
+        todas_derivadas = []
+        curvas_plotadas = []
+
         for nome_curva, info in curvas.items():
             df = info["dados"]
             cor = info["cor"]
-            if col_x in df.columns and col_y in df.columns:
-                x = df[col_x].to_numpy()
-                y = df[col_y].to_numpy()
-                valido = np.isfinite(x) & np.isfinite(y)
-                if valido.sum() < 3:
-                    continue
-                dx = np.gradient(x[valido])
-                dy = np.gradient(y[valido])
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    derivada = np.where(np.abs(dx) > 1e-6, dy / dx, np.nan)
-                ax.plot(x[valido], derivada, color=cor, label=nome_curva,
-                        marker=".", markersize=2, linewidth=1)
+            if col_x not in df.columns or col_y not in df.columns:
+                continue
+            x = df[col_x].to_numpy()
+            y = df[col_y].to_numpy()
+            valido = np.isfinite(x) & np.isfinite(y)
+            if valido.sum() < 5:
+                continue
+
+            x_suave = _suavizar(x[valido])
+            y_suave = _suavizar(y[valido])
+            dx = np.gradient(x_suave)
+            dy = np.gradient(y_suave)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                derivada = np.where(np.abs(dx) > 1e-6, dy / dx, np.nan)
+
+            curvas_plotadas.append((x[valido], derivada, cor, nome_curva))
+            todas_derivadas.append(derivada[np.isfinite(derivada)])
+
+        for x_vals, derivada, cor, nome_curva in curvas_plotadas:
+            ax.plot(x_vals, derivada, color=cor, label=nome_curva,
+                    marker=".", markersize=2, linewidth=1)
+
+        if todas_derivadas:
+            valores = np.concatenate(todas_derivadas)
+            if len(valores) > 0:
+                p_baixo, p_alto = np.nanpercentile(valores, [2, 98])
+                margem = 0.1 * (p_alto - p_baixo) if p_alto > p_baixo else 1.0
+                ax.set_ylim(p_baixo - margem, p_alto + margem)
+
         ax.axhline(y=0, color="gray", linewidth=0.6, alpha=0.6)
         ax.set_xlabel(rotulo_x)
         ax.set_ylabel(f"d({rotulo_y.split(' ')[0]})/d({rotulo_x.split(' ')[0]})")
