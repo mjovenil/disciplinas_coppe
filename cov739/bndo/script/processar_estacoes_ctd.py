@@ -656,47 +656,202 @@ def _suavizar(serie: np.ndarray, janela: "int | None" = None) -> np.ndarray:
     return pd.Series(serie).rolling(window=janela, center=True, min_periods=1).mean().to_numpy()
 
 
-def calcular_c_diferencas_finitas(estacao: pd.DataFrame) -> pd.DataFrame:
+def _derivada_por_bins_por_profundidade(prof: np.ndarray, x: np.ndarray, y: np.ndarray,
+                                          n_bins: int = 50, min_pontos_por_bin: int = 3):
+    """
+    Calcula uma derivada dy/dx ROBUSTA, agrupando os dados em 'n_bins'
+    faixas de PROFUNDIDADE (não de x) — a profundidade é sempre
+    monótona ao longo de um perfil, diferente de x (que pode ser, por
+    exemplo, salinidade: ela sobe até um máximo e depois desce de novo,
+    então o mesmo valor de salinidade aparece em duas profundidades bem
+    diferentes).
+
+    Se agrupássemos por valor de x diretamente (como em
+    _derivada_por_bins), esses dois pontos fisicamente distintos cairiam
+    na mesma faixa e seriam misturados, criando um salto artificial na
+    derivada bem na região do máximo/mínimo de x. Agrupar por
+    profundidade evita esse problema, preservando a ordem real do
+    perfil.
+
+    Faixas com menos de 'min_pontos_por_bin' medições são descartadas —
+    a média de 1-2 pontos isolados é pouco confiável e costuma ser a
+    origem dos picos residuais nas derivadas (mais comum em perfis
+    curtos, como as estações de água Rasa, que têm poucos pontos no
+    total). O número de faixas é reduzido automaticamente se necessário
+    para que cada uma tenha pontos suficientes.
+
+    Retorna (x_bins, dy/dx_bins), ordenados por profundidade (não por x).
+    """
+    prof = np.asarray(prof, dtype=float)
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    valido = np.isfinite(prof) & np.isfinite(x) & np.isfinite(y)
+    prof, x, y = prof[valido], x[valido], y[valido]
+
+    if len(prof) < 4:
+        return np.array([]), np.array([])
+
+    # Garante pelo menos min_pontos_por_bin pontos por faixa, em média
+    n_bins = max(3, min(n_bins, len(prof) // min_pontos_por_bin))
+    bordas = np.linspace(prof.min(), prof.max(), n_bins + 1)
+    indices_bin = np.clip(np.digitize(prof, bordas) - 1, 0, n_bins - 1)
+
+    prof_bin = np.full(n_bins, np.nan)
+    x_bin = np.full(n_bins, np.nan)
+    y_bin = np.full(n_bins, np.nan)
+    for i in range(n_bins):
+        mascara = indices_bin == i
+        if mascara.sum() >= min_pontos_por_bin:
+            prof_bin[i] = prof[mascara].mean()
+            x_bin[i] = x[mascara].mean()
+            y_bin[i] = y[mascara].mean()
+
+    valido_bin = np.isfinite(prof_bin) & np.isfinite(x_bin) & np.isfinite(y_bin)
+    prof_bin, x_bin, y_bin = prof_bin[valido_bin], x_bin[valido_bin], y_bin[valido_bin]
+
+    ordem = np.argsort(prof_bin)
+    prof_bin, x_bin, y_bin = prof_bin[ordem], x_bin[ordem], y_bin[ordem]
+
+    if len(x_bin) < 3:
+        return np.array([]), np.array([])
+
+    # Regra da cadeia: dY/dX = (dY/d_prof) / (dX/d_prof). Calculamos as
+    # duas derivadas EM RELAÇÃO À PROFUNDIDADE (sempre monótona, logo
+    # bem-comportada para np.gradient) e só então dividimos — em vez de
+    # chamar np.gradient(y_bin, x_bin) diretamente, o que exigiria x_bin
+    # monótono (não é o caso: salinidade sobe e desce).
+    dx_dprof = np.gradient(x_bin, prof_bin)
+    dy_dprof = np.gradient(y_bin, prof_bin)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dy_dx = np.where(np.abs(dx_dprof) > 1e-9, dy_dprof / dx_dprof, np.nan)
+
+    return x_bin, dy_dx
+
+
+def _derivada_por_bins(x: np.ndarray, y: np.ndarray, n_bins: int = 50):
+    """
+    Calcula uma derivada dy/dx ROBUSTA, agrupando os dados em 'n_bins'
+    faixas de largura igual ao longo de x, calculando a média de x e y
+    dentro de cada faixa, e só então diferenciando entre faixas
+    vizinhas.
+
+    Por que isso é mais robusto que diferenciar ponto a ponto (mesmo com
+    suavização prévia): em trechos onde x varia muito pouco entre
+    medições vizinhas (ex.: água profunda com temperatura quase
+    constante, ou uma camada bem misturada com densidade quase
+    constante), o Δx ponto a ponto pode ficar artificialmente pequeno e
+    explodir a divisão — isso é um problema estrutural dos dados, não
+    ruído de sensor, e suavizar sozinho não resolve. Agrupar em faixas
+    de largura fixa GARANTE um Δx mínimo a cada passo, eliminando esse
+    problema na raiz (ao custo de reduzir a resolução da curva).
+
+    Retorna (x_bins, dy/dx_bins) — arrays bem mais curtos que os
+    originais (um valor por faixa), já ordenados por x.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    valido = np.isfinite(x) & np.isfinite(y)
+    x, y = x[valido], y[valido]
+
+    if len(x) < 4:
+        return np.array([]), np.array([])
+
+    n_bins = max(3, min(n_bins, len(x) // 3))
+    bordas = np.linspace(x.min(), x.max(), n_bins + 1)
+    indices_bin = np.clip(np.digitize(x, bordas) - 1, 0, n_bins - 1)
+
+    x_bin = np.full(n_bins, np.nan)
+    y_bin = np.full(n_bins, np.nan)
+    for i in range(n_bins):
+        mascara = indices_bin == i
+        if mascara.any():
+            x_bin[i] = x[mascara].mean()
+            y_bin[i] = y[mascara].mean()
+
+    valido_bin = np.isfinite(x_bin) & np.isfinite(y_bin)
+    x_bin, y_bin = x_bin[valido_bin], y_bin[valido_bin]
+
+    ordem = np.argsort(x_bin)
+    x_bin, y_bin = x_bin[ordem], y_bin[ordem]
+
+    if len(x_bin) < 3:
+        return np.array([]), np.array([])
+
+    dy_dx = np.gradient(y_bin, x_bin)
+    return x_bin, dy_dx
+
+
+def calcular_c_diferencas_finitas(estacao: pd.DataFrame, n_bins: int = 60) -> pd.DataFrame:
     """
     Calcula a velocidade do som usando DIRETAMENTE a fórmula geral e exata
     para fluidos (vista em aula):
 
         c = sqrt( (∂P/∂ρ)_S )
 
-    Aqui (∂P/∂ρ) é estimado por DIFERENÇAS FINITAS a partir dos próprios
-    dados medidos de Pressão e Densidade in situ do perfil — ou seja, não
-    usa nenhuma fórmula empírica (Mackenzie/UNESCO), só a definição física
-    pura aplicada aos dados reais. Isso permite comparar a fórmula teórica
-    diretamente com o valor empírico (Mackenzie) já calculado.
+    Aqui (∂P/∂ρ) é estimado agrupando o perfil em 'n_bins' faixas de
+    profundidade (ver _derivada_por_bins_por_profundidade), calculando a
+    Pressão e a Densidade médias de cada faixa, e diferenciando entre
+    faixas — não usa nenhuma fórmula empírica (Mackenzie/UNESCO), só a
+    definição física pura aplicada aos dados reais.
 
-    Pressão e densidade são suavizadas (ver _suavizar) antes da derivada,
-    para evitar que ruído de medição seja amplificado pela divisão.
     Pressão é convertida de dbar para Pa (1 dbar = 10.000 Pa) antes da
     derivada, para que o resultado saia em unidades corretas (m/s).
 
-    Pontos onde a densidade praticamente não varia entre medições
-    vizinhas (camada bem misturada) são descartados, pois a divisão por
-    Δρ≈0 explode numericamente e não tem significado físico ali.
-    """
-    estacao = estacao.copy()
-    P_pa = _suavizar(estacao["Pressão [db]"].to_numpy() * 1.0e4)
-    rho = _suavizar(estacao["Densidade ro [kg/m³]"].to_numpy())
+    IMPORTANTE — desvio sistemático esperado: mesmo sem nenhum erro de
+    cálculo, este valor tende a ficar consistentemente ABAIXO do valor
+    empírico (Mackenzie), porque Δρ/Δz ao longo de um perfil real
+    combina DOIS efeitos: a compressão pela pressão (o que a fórmula
+    c=√(∂P/∂ρ)_S pressupõe, mantendo a entropia constante) E a variação
+    real de temperatura/salinidade por estratificação/mistura do oceano
+    (que não tem nada a ver com compressão). Como o perfil medido não é
+    adiabático, essa razão bruta não isola só o efeito de compressão —
+    e por isso difere sistematicamente do valor adiabático "puro" que o
+    Mackenzie calcula corretamente a partir da equação de estado. Essa
+    diferença é, portanto, um resultado físico esperado, não um bug.
 
-    dP = np.gradient(P_pa)
-    drho = np.gradient(rho)
+    Retorna um DataFrame PEQUENO (um ponto por faixa de profundidade,
+    não mais um ponto por medição original) com as colunas
+    'Profundidade [m]' e 'Velocidade do som (dP/dρ) [m/s]' — para uso
+    direto em gerar_figura_comparacao_formula.
+    """
+    prof = estacao["Profundidade [m]"].to_numpy()
+    P_pa = estacao["Pressão [db]"].to_numpy() * 1.0e4
+    rho = estacao["Densidade ro [kg/m³]"].to_numpy()
+
+    valido = np.isfinite(prof) & np.isfinite(P_pa) & np.isfinite(rho)
+    prof, P_pa, rho = prof[valido], P_pa[valido], rho[valido]
+
+    min_pontos_por_bin = 3
+    n_bins_efetivo = max(3, min(n_bins, len(prof) // min_pontos_por_bin)) if len(prof) > 0 else 3
+    bordas = np.linspace(prof.min(), prof.max(), n_bins_efetivo + 1) if len(prof) > 0 else np.array([0, 1])
+    indices_bin = np.clip(np.digitize(prof, bordas) - 1, 0, n_bins_efetivo - 1) if len(prof) > 0 else np.array([])
+
+    prof_bin, P_bin, rho_bin = [], [], []
+    for i in range(n_bins_efetivo):
+        mascara = indices_bin == i
+        if mascara.sum() >= min_pontos_por_bin:
+            prof_bin.append(prof[mascara].mean())
+            P_bin.append(P_pa[mascara].mean())
+            rho_bin.append(rho[mascara].mean())
+
+    prof_bin = np.array(prof_bin)
+    P_bin = np.array(P_bin)
+    rho_bin = np.array(rho_bin)
+
+    if len(prof_bin) < 3:
+        return pd.DataFrame({"Profundidade [m]": prof_bin,
+                              "Velocidade do som (dP/dρ) [m/s]": np.full(len(prof_bin), np.nan)})
+
+    dP = np.gradient(P_bin, prof_bin)
+    drho = np.gradient(rho_bin, prof_bin)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         c2 = dP / drho
 
-    # Descarta pontos com Δρ desprezível (camada bem misturada) ou
-    # resultado sem sentido físico (c² negativo, o que indicaria
-    # densidade diminuindo com a pressão — instabilidade não realista
-    # aqui, e sim ruído numérico)
     invalido = (np.abs(drho) < 1e-3) | (c2 <= 0) | ~np.isfinite(c2)
     c = np.sqrt(np.where(invalido, np.nan, c2))
 
-    estacao["Velocidade do som (dP/dρ) [m/s]"] = c
-    return estacao
+    return pd.DataFrame({"Profundidade [m]": prof_bin, "Velocidade do som (dP/dρ) [m/s]": c})
 
 
 def calcular_c_gas_ideal(estacao: pd.DataFrame, gamma_agua: float = 1.01) -> pd.DataFrame:
@@ -740,8 +895,11 @@ def gerar_figura_comparacao_formula(estacoes_zee: dict, caminho_saida: Path) -> 
     variação de pressão/densidade, o que deixa a comparação mais clara):
 
       1) Mackenzie/BNDO — valor empírico já usado no resto do trabalho
+         (resolução original, ponto a ponto)
       2) sqrt(dP/dρ) — fórmula geral e exata, calculada por diferenças
-         finitas diretamente dos dados medidos (sem fórmula empírica)
+         entre FAIXAS de profundidade (ver _derivada_por_bins/
+         calcular_c_diferencas_finitas) — resolução mais baixa
+         (dezenas de pontos, não milhares), mas numericamente estável
       3) sqrt(γP/ρ) — fórmula de gás ideal, aplicada "errada" de
          propósito à água, para evidenciar por que ela não serve para
          líquidos.
@@ -757,14 +915,15 @@ def gerar_figura_comparacao_formula(estacoes_zee: dict, caminho_saida: Path) -> 
         eixos = [eixos]
 
     for ax, (regiao, estacao) in zip(eixos, regioes_com_zee.items()):
-        estacao = calcular_c_diferencas_finitas(estacao)
-        estacao = calcular_c_gas_ideal(estacao)
+        c_binado = calcular_c_diferencas_finitas(estacao)
+        estacao_gas = calcular_c_gas_ideal(estacao)
 
         ax.plot(estacao["Velocidade do som [m/s]"], estacao["Profundidade [m]"],
                 color="tab:blue", label="Mackenzie / BNDO (empírica)")
-        ax.plot(estacao["Velocidade do som (dP/dρ) [m/s]"], estacao["Profundidade [m]"],
-                color="tab:green", linestyle="--", label=r"$\sqrt{dP/d\rho}$ (geral, dados reais)")
-        ax.plot(estacao["Velocidade do som (gás ideal) [m/s]"], estacao["Profundidade [m]"],
+        ax.plot(c_binado["Velocidade do som (dP/dρ) [m/s]"], c_binado["Profundidade [m]"],
+                color="tab:green", linestyle="--", marker="o", markersize=3,
+                label=r"$\sqrt{dP/d\rho}$ (geral, por faixas de profundidade)")
+        ax.plot(estacao_gas["Velocidade do som (gás ideal) [m/s]"], estacao_gas["Profundidade [m]"],
                 color="tab:red", linestyle=":", label=r"$\sqrt{\gamma P/\rho}$ (gás ideal — errado p/ líquido)")
 
         ax.set_xlabel("Velocidade do som [m/s]")
@@ -838,58 +997,35 @@ def gerar_figura_dispersao_derivada(curvas: dict, caminho_saida: Path, titulo: s
     """
     Versão 'k=1' dos mesmos 5 painéis: em vez do valor da propriedade em
     si, plota a DERIVADA dY/dX (taxa de variação local), calculada por
-    diferenças finitas (numpy.gradient) sobre as séries SUAVIZADAS (ver
-    _suavizar) — sem suavizar antes, o ruído de medição em X e Y é
-    amplificado pela divisão e a derivada fica inutilizável (puro ruído).
+    _derivada_por_bins_por_profundidade — agrupando os dados em faixas
+    de PROFUNDIDADE (não de X) antes de diferenciar. Isso evita dois
+    problemas: (1) a explosão numérica ao dividir por Δx quase nulo, e
+    (2) misturar pontos de profundidades bem diferentes que só por
+    coincidência compartilham o mesmo valor de X — o que aconteceria em
+    faixas como Salinidade, que não é monótona com a profundidade (sobe
+    até um máximo e depois desce).
 
     Um valor grande de |dY/dX| aponta uma região onde a propriedade X
     influencia fortemente a propriedade Y — por exemplo, um pico em
     |dc/dT| marca onde a temperatura mais afeta a velocidade do som
     naquele perfil (tipicamente perto da termoclina).
-
-    A escala vertical de cada painel é limitada ao intervalo entre os
-    percentis 2 e 98 dos valores calculados, para que eventuais picos
-    residuais isolados não dominem toda a escala e escondam o
-    comportamento típico da curva.
     """
     fig, eixos = plt.subplots(2, 3, figsize=(18, 11))
     eixos = eixos.flatten()
 
     for ax, (col_x, col_y, rotulo_x, rotulo_y, titulo_painel) in zip(eixos, PARAMETROS_DISPERSAO):
-        todas_derivadas = []
-        curvas_plotadas = []
-
         for nome_curva, info in curvas.items():
             df = info["dados"]
             cor = info["cor"]
-            if col_x not in df.columns or col_y not in df.columns:
+            if col_x not in df.columns or col_y not in df.columns or "Profundidade [m]" not in df.columns:
                 continue
-            x = df[col_x].to_numpy()
-            y = df[col_y].to_numpy()
-            valido = np.isfinite(x) & np.isfinite(y)
-            if valido.sum() < 5:
+            x_bin, derivada = _derivada_por_bins_por_profundidade(
+                df["Profundidade [m]"].to_numpy(), df[col_x].to_numpy(), df[col_y].to_numpy()
+            )
+            if len(x_bin) == 0:
                 continue
-
-            x_suave = _suavizar(x[valido])
-            y_suave = _suavizar(y[valido])
-            dx = np.gradient(x_suave)
-            dy = np.gradient(y_suave)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                derivada = np.where(np.abs(dx) > 1e-6, dy / dx, np.nan)
-
-            curvas_plotadas.append((x[valido], derivada, cor, nome_curva))
-            todas_derivadas.append(derivada[np.isfinite(derivada)])
-
-        for x_vals, derivada, cor, nome_curva in curvas_plotadas:
-            ax.plot(x_vals, derivada, color=cor, label=nome_curva,
-                    marker=".", markersize=2, linewidth=1)
-
-        if todas_derivadas:
-            valores = np.concatenate(todas_derivadas)
-            if len(valores) > 0:
-                p_baixo, p_alto = np.nanpercentile(valores, [2, 98])
-                margem = 0.1 * (p_alto - p_baixo) if p_alto > p_baixo else 1.0
-                ax.set_ylim(p_baixo - margem, p_alto + margem)
+            ax.plot(x_bin, derivada, color=cor, label=nome_curva,
+                    marker="o", markersize=3, linewidth=1.2)
 
         ax.axhline(y=0, color="gray", linewidth=0.6, alpha=0.6)
         ax.set_xlabel(rotulo_x)
